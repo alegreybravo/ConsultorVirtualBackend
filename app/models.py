@@ -5,7 +5,7 @@ from sqlalchemy import (
     ForeignKey, SmallInteger, Boolean, Text, Index
 )
 from sqlalchemy.orm import relationship
-from database import Base
+from .database import Base
 
 # ============================================================
 #  Configuración de esquema

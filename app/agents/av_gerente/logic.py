@@ -14,6 +14,52 @@ from ...lc_llm import get_chat_model
 from ...tools.prompting import build_system_prompt
 from ...tools.fuzzy import fuzzify_dso, fuzzify_dpo, fuzzify_ccc, liquidity_risk
 from ...tools.causality import causal_hypotheses
+from ...utils.knowledge_base import get_applicable_rules  # KB
+
+
+# =========================
+# System Prompt Gerente Virtual
+# =========================
+SYSTEM_PROMPT_GERENTE_VIRTUAL = """
+Eres el Gerente Virtual de una pequeña o mediana empresa (pyme) en Costa Rica.
+
+Tu misión es dar recomendaciones accionables y realistas, combinando:
+1) Datos cuantitativos (KPIs como DSO, DPO, CCC, montos de CxC y CxP, balances).
+2) Señales cualitativas (fuzzy_signals, causalidad, resumen de subagentes).
+3) Contexto de envejecimiento de saldos (aging de CxC y CxP).
+4) Situación general descrita en la pregunta del usuario.
+5) Contexto de la empresa (tamaño, sector, zona, nivel de formalidad, años operando), cuando esté disponible.
+6) Reglas de una base de conocimiento (kb_rules) que ya incluyen buenas prácticas y criterios estándar.
+
+Principios:
+- No inventes números: usa SOLO los datos entregados en el contexto.
+- Si no hay un dato, trátalo como “N/D” y explica que hace falta información.
+- Adapta tus recomendaciones al contexto típico de una pyme/microempresa:
+  - Herramientas simples (Excel, calendarios, controles básicos).
+  - Nada de ERP complejos, emisiones de bonos, fusiones, etc.
+
+Tu salida debe:
+- Ayudar al dueño/gerente a entender en lenguaje sencillo qué está pasando con su liquidez.
+- Conectar explícitamente los KPIs con las acciones (ej.: DSO alto → problemas de cobranza; DPO bajo → se paga muy rápido a proveedores, etc.).
+- Proponer acciones en horizontes de tiempo razonables (30, 60, 90 días).
+- Mantener un enfoque tipo Cuadro de Mando Integral (BSC):
+  Finanzas, Clientes, Procesos internos, Aprendizaje y crecimiento.
+
+Uso de contexto de empresa y base de conocimiento:
+- Si recibes un bloque JSON llamado company_context, úsalo para ajustar el nivel de sofisticación:
+  - micro/pequeña → soluciones sencillas, baja carga administrativa.
+  - sectores distintos → ejemplos y énfasis adaptados (comercio, servicios, etc.).
+- Si recibes un bloque JSON llamado kb_rules con reglas activadas de una base de conocimiento:
+  - Usa esas reglas como guía de buenas prácticas y recomendaciones estándar.
+  - No inventes reglas nuevas ni contradigas lo que dice la base de conocimiento.
+  - Puedes referenciar las reglas por id (ej. R_CXC_005, R_FIN_001) cuando ayude a explicar el criterio.
+  - Cuando apliques una recomendación que coincide claramente con una regla, puedes mencionarla entre paréntesis, por ejemplo: "(según R_CXC_005)".
+
+Importante:
+- Si los KPIs son razonables, destaca las fortalezas y sugiere mantener disciplina.
+- Si los KPIs son críticos (ej. CCC muy positivo, mucha CxC vencida, caja baja), prioriza liquidez y gestión de riesgo.
+- No hagas comparaciones intermensuales (“mejor/peor que el mes pasado”) a menos que el contexto las traiga explícitamente.
+"""
 
 
 class Agent(BaseAgent):
@@ -99,12 +145,10 @@ class Agent(BaseAgent):
         """
         period_text = ""
         if isinstance(period_in, dict):
-            # preferimos texto “humano” si viene
             pt = str(period_in.get("text") or "").strip()
             if pt:
                 period_text = pt
             else:
-                # Derivar YYYY-MM de start si existe
                 try:
                     start = dateparser.isoparse(period_in["start"])
                     period_text = f"{start.year:04d}-{start.month:02d}"
@@ -113,9 +157,8 @@ class Agent(BaseAgent):
         elif isinstance(period_in, str):
             period_text = period_in.strip()
 
-        # Construir due (YYYY-MM-30) tomando YYYY-MM de period_text si está,
-        # si no, derivando de end/start si vienen
         due = "XXXX-XX-30"
+
         def _yyyy_mm_from_any(p: Any) -> Optional[str]:
             if isinstance(p, str) and len(p) >= 7 and p[4] == "-":
                 return p[:7]
@@ -138,7 +181,12 @@ class Agent(BaseAgent):
     # -------------------------
     def _summarize_trace(self, trace: List[Dict[str, Any]]) -> Tuple[str, Dict[str, Any]]:
         if not trace:
-            return "(sin resultados de subagentes)", {"dso": None, "dpo": None, "ccc": None, "cash": None}
+            return "(sin resultados de subagentes)", {
+                "dso": None,
+                "dpo": None,
+                "ccc": None,
+                "cash": None,
+            }
         trimmed = trace[: self.MAX_TRACE_ITEMS]
         lines: List[str] = []
         dso = dpo = ccc = cash = None
@@ -150,7 +198,9 @@ class Agent(BaseAgent):
                 for k in ("status", "highlights", "top_issues", "notes"):
                     if k in res:
                         summary_candidates.append(f"{k}: {res[k]}")
-                summary = "; ".join(map(str, summary_candidates)) or str({k: res[k] for k in list(res)[:6]})
+                summary = "; ".join(map(str, summary_candidates)) or str(
+                    {k: res[k] for k in list(res)[:6]}
+                )
             lines.append(f"{agent_name}: {self._truncate(summary, self.MAX_FIELD_CHARS)}")
             if dso is None and "dso" in res:
                 dso = self._coerce_float(res.get("dso"))
@@ -178,10 +228,8 @@ class Agent(BaseAgent):
             "aging_cxp": {},
             "balances": {},
         }
-        # Aging CxC / CxP
         ctx["aging_cxc"] = self._extract_aging(trace, "aaav_cxc")
         ctx["aging_cxp"] = self._extract_aging(trace, "aaav_cxp")
-        # KPIs + balances (del contable si existe)
         for res in trace or []:
             data = res.get("data") or {}
             kpi = data.get("kpi") or {}
@@ -195,13 +243,59 @@ class Agent(BaseAgent):
         return ctx
 
     def _build_fuzzy_signals(self, metrics: Dict[str, Optional[float]]) -> Dict[str, Any]:
-        dso, dpo, ccc, cash = metrics.get("dso"), metrics.get("dpo"), metrics.get("ccc"), metrics.get("cash")
+        dso, dpo, ccc, cash = (
+            metrics.get("dso"),
+            metrics.get("dpo"),
+            metrics.get("ccc"),
+            metrics.get("cash"),
+        )
         out: Dict[str, Any] = {}
-        if dso is not None: out["dso"] = self._to_jsonable(fuzzify_dso(dso))
-        if dpo is not None: out["dpo"] = self._to_jsonable(fuzzify_dpo(dpo))
-        if ccc is not None: out["ccc"] = self._to_jsonable(fuzzify_ccc(ccc))
-        if cash is not None and ccc is not None: out["liquidity_risk"] = self._to_jsonable(liquidity_risk(cash, ccc))
+        if dso is not None:
+            out["dso"] = self._to_jsonable(fuzzify_dso(dso))
+        if dpo is not None:
+            out["dpo"] = self._to_jsonable(fuzzify_dpo(dpo))
+        if ccc is not None:
+            out["ccc"] = self._to_jsonable(fuzzify_ccc(ccc))
+        if cash is not None and ccc is not None:
+            out["liquidity_risk"] = self._to_jsonable(liquidity_risk(cash, ccc))
         return out
+
+    # -------------------------
+    # Detectar si hay datos duros (modo DB) o es consultivo
+    # -------------------------
+    def _has_hard_data(self, ctx: Dict[str, Any], metrics: Dict[str, Any]) -> bool:
+        """
+        Devuelve True si hay KPIs numéricos / aging / balances suficientes
+        como para decir que estamos en 'modo con datos'.
+        De lo contrario, estamos en un caso consultivo (sin BD).
+        """
+        # 1) KPIs en ctx
+        kpis = (ctx.get("kpis") or {})
+        for v in kpis.values():
+            if isinstance(v, (int, float)):
+                return True
+
+        # 2) KPIs top-level (metrics dso/dpo/ccc/cash)
+        for k in ("dso", "dpo", "ccc", "cash"):
+            v = metrics.get(k)
+            if isinstance(v, (int, float)):
+                return True
+
+        # 3) Aging con algo distinto de cero
+        for bucket in ("aging_cxc", "aging_cxp"):
+            aging = ctx.get(bucket) or {}
+            if any(
+                isinstance(aging.get(b), (int, float)) and aging.get(b) != 0
+                for b in ("0_30", "31_60", "61_90", "90_plus")
+            ):
+                return True
+
+        # 4) Balances con algún valor numérico
+        balances = ctx.get("balances") or {}
+        if any(isinstance(v, (int, float)) for v in balances.values()):
+            return True
+
+        return False
 
     # -------------------------
     # Causalidad y órdenes deterministas
@@ -210,7 +304,9 @@ class Agent(BaseAgent):
         k = ctx.get("kpis", {})
         aging_cxp = ctx.get("aging_cxp") or {}
         hyps = []
-        dso = k.get("DSO"); dpo = k.get("DPO"); ccc = k.get("CCC")
+        dso = k.get("DSO")
+        dpo = k.get("DPO")
+        ccc = k.get("CCC")
         if isinstance(dso, (int, float)) and dso > 45:
             hyps.append("DSO alto sugiere fricción en cobranza o crédito laxo (segmentos/condiciones).")
         if isinstance(dpo, (int, float)) and dpo < 40:
@@ -225,23 +321,165 @@ class Agent(BaseAgent):
     def _deterministic_orders(self, ctx: Dict[str, Any], period_in: Any) -> List[Dict[str, Any]]:
         k = ctx.get("kpis", {})
         bal = ctx.get("balances", {})
-        dso = k.get("DSO"); dpo = k.get("DPO"); ccc = k.get("CCC")
-        ar = bal.get("AR_outstanding"); ap = bal.get("AP_outstanding")
+        dso = k.get("DSO")
+        dpo = k.get("DPO")
+        ccc = k.get("CCC")
+        ar = bal.get("AR_outstanding")
+        ap = bal.get("AP_outstanding")
         ratio = (ar / ap) if isinstance(ar, (int, float)) and isinstance(ap, (int, float)) and ap > 0 else None
 
-        # due consistente con período dict/string
         _, due = self._period_text_and_due(period_in)
 
         orders: List[Dict[str, Any]] = []
         if isinstance(dso, (int, float)) and dso > 45:
-            orders.append({"title":"Campaña dunning top-10 clientes","owner":"CxC","priority":"P1","kpi":"DSO","due":due})
+            orders.append(
+                {
+                    "title": "Campaña dunning top-10 clientes",
+                    "owner": "CxC",
+                    "priority": "P1",
+                    "kpi": "DSO",
+                    "due": due,
+                }
+            )
         if isinstance(dpo, (int, float)) and dpo < 40:
-            orders.append({"title":"Renegociar 3 proveedores clave","owner":"CxP","priority":"P2","kpi":"DPO","due":due})
+            orders.append(
+                {
+                    "title": "Renegociar 3 proveedores clave",
+                    "owner": "CxP",
+                    "priority": "P2",
+                    "kpi": "DPO",
+                    "due": due,
+                }
+            )
         if isinstance(ccc, (int, float)) and ccc > 20:
-            orders.append({"title":"Freeze gastos no esenciales (30d)","owner":"Administración","priority":"P1","kpi":"CCC","due":due})
+            orders.append(
+                {
+                    "title": "Freeze gastos no esenciales (30d)",
+                    "owner": "Administración",
+                    "priority": "P1",
+                    "kpi": "CCC",
+                    "due": due,
+                }
+            )
         if isinstance(ratio, float) and ratio > 1.30:
-            orders.append({"title":"Sync semanal CxC/CxP sobre flujos","owner":"Administración","priority":"P3","kpi":"CCC","due":due})
+            orders.append(
+                {
+                    "title": "Sync semanal CxC/CxP sobre flujos",
+                    "owner": "Administración",
+                    "priority": "P3",
+                    "kpi": "CCC",
+                    "due": due,
+                }
+            )
         return orders
+
+    # -------------------------
+    # KB helpers: prioridad y asociación con KPIs
+    # -------------------------
+    def _rule_priority(self, rule: Dict[str, Any]) -> int:
+        """
+        Asigna prioridad numérica a una regla según su 'scope':
+        - riesgo / alerta -> 0 (más importante)
+        - operativo       -> 1
+        - consultivo/gerencial -> 2
+        - otras/indefinidas -> 3
+        """
+        scopes = rule.get("scope") or []
+        if not isinstance(scopes, list):
+            scopes = [scopes]
+
+        scopes_lower = {str(s).lower() for s in scopes}
+
+        if "riesgo" in scopes_lower or "alerta" in scopes_lower:
+            return 0
+        if "operativo" in scopes_lower:
+            return 1
+        if "consultivo" in scopes_lower or "gerencial" in scopes_lower:
+            return 2
+        return 3
+
+    def _associate_rules_with_kpis(
+        self,
+        rules: List[Dict[str, Any]],
+        ctx: Dict[str, Any],
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Crea un mapa de reglas KB asociadas a ciertos indicadores/situaciones:
+          - DSO, DPO, CCC
+          - CxC_vencidas, CxP_vencidas
+          - generales (reglas que aplican al contexto pero no a un KPI específico)
+        Esto sirve para que el LLM pueda conectar KPIs → reglas concretas.
+        """
+        assoc: Dict[str, List[Dict[str, Any]]] = {
+            "DSO": [],
+            "DPO": [],
+            "CCC": [],
+            "CxC_vencidas": [],
+            "CxP_vencidas": [],
+            "generales": [],
+        }
+
+        aging_cxc = ctx.get("aging_cxc") or {}
+        aging_cxp = ctx.get("aging_cxp") or {}
+
+        cxc_vencidas = any(
+            isinstance(aging_cxc.get(bucket), (int, float)) and aging_cxc.get(bucket) > 0
+            for bucket in ("31_60", "61_90", "90_plus")
+        )
+        cxp_vencidas = any(
+            isinstance(aging_cxp.get(bucket), (int, float)) and aging_cxp.get(bucket) > 0
+            for bucket in ("31_60", "61_90", "90_plus")
+        )
+
+        for r in rules or []:
+            if not isinstance(r, dict):
+                continue
+
+            attached = False
+
+            # 1) Reglas con conditions explícitas de métricas
+            conds = r.get("conditions") or []
+            if isinstance(conds, list):
+                for c in conds:
+                    if not isinstance(c, dict):
+                        continue
+                    metric_name = str(c.get("metric") or "").lower()
+                    if metric_name in ("dso", "dias_envejecimiento_cxc"):
+                        assoc["DSO"].append(r)
+                        attached = True
+                    elif metric_name in ("dpo", "dias_envejecimiento", "dias_atraso_promedio"):
+                        assoc["DPO"].append(r)
+                        attached = True
+                    elif metric_name in ("ccc", "ciclo_caja"):
+                        assoc["CCC"].append(r)
+                        attached = True
+                    elif metric_name in ("monto_cxc_vencidas", "monto_cxc_vencida"):
+                        assoc["CxC_vencidas"].append(r)
+                        attached = True
+                    elif metric_name in ("monto_cxp_vencidas", "monto_cxp_vencida"):
+                        assoc["CxP_vencidas"].append(r)
+                        attached = True
+
+            # 2) Tags basados en vencimientos
+            tags = {str(t).lower() for t in (r.get("tags") or [])}
+            if "vencimientos" in tags or "cxc_vencidas" in tags or "morosidad" in tags:
+                if cxc_vencidas:
+                    assoc["CxC_vencidas"].append(r)
+                    attached = True
+            if "vencimientos" in tags or "cxp_vencidas" in tags:
+                if cxp_vencidas:
+                    assoc["CxP_vencidas"].append(r)
+                    attached = True
+
+            # 3) Si no se pudo asociar a un KPI concreto, va a 'generales'
+            if not attached:
+                assoc["generales"].append(r)
+
+        # Ordenar cada lista según prioridad (riesgo > operativo > consultivo > otras)
+        for key, lst in assoc.items():
+            assoc[key] = sorted(lst, key=self._rule_priority)
+
+        return assoc
 
     # -------------------------
     # LLM JSON parser robusto
@@ -249,6 +487,7 @@ class Agent(BaseAgent):
     def _llm_json(self, llm, system_prompt: str, user_prompt: str) -> Optional[Any]:
         def _clean(s: str) -> str:
             return self._sanitize_text(s or "")
+
         def _try_parse_any_json(s: str) -> Optional[Any]:
             s = s.strip()
             if s.startswith("{") or s.startswith("["):
@@ -257,12 +496,12 @@ class Agent(BaseAgent):
                 except Exception:
                     pass
             starts = [m.start() for m in re.finditer(r"[\{\[]", s)]
-            ends   = [m.start() for m in re.finditer(r"[\}\]]", s)]
+            ends = [m.start() for m in re.finditer(r"[\}\]]", s)]
             for i in range(len(starts)):
-                for j in range(len(ends)-1, i-1, -1):
+                for j in range(len(ends) - 1, i - 1, -1):
                     if ends[j] <= starts[i]:
                         continue
-                    frag = s[starts[i]:ends[j]+1]
+                    frag = s[starts[i] : ends[j] + 1]
                     try:
                         return json.loads(frag)
                     except Exception:
@@ -270,10 +509,12 @@ class Agent(BaseAgent):
             return None
 
         try:
-            resp = llm.invoke([
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ]).content
+            resp = llm.invoke(
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ]
+            ).content
         except Exception:
             return None
         return _try_parse_any_json(_clean(resp))
@@ -281,10 +522,17 @@ class Agent(BaseAgent):
     # -------------------------
     # Fallback y post-proceso
     # -------------------------
-    def _fallback_report(self, ctx: Dict[str, Any], fuzzy_signals: Dict[str, Any],
-                         causal_traditional: List[str], causal_llm: List[str]) -> Dict[str, Any]:
+    def _fallback_report(
+        self,
+        ctx: Dict[str, Any],
+        fuzzy_signals: Dict[str, Any],
+        causal_traditional: List[str],
+        causal_llm: List[str],
+    ) -> Dict[str, Any]:
         k = ctx.get("kpis", {})
-        dso = k.get("DSO"); dpo = k.get("DPO"); ccc = k.get("CCC")
+        dso = k.get("DSO")
+        dpo = k.get("DPO")
+        ccc = k.get("CCC")
 
         hallazgos, riesgos, reco = [], [], []
 
@@ -332,22 +580,29 @@ class Agent(BaseAgent):
             },
             "causalidad": {
                 "hipotesis": list(dict.fromkeys((causal_traditional or []) + (causal_llm or [])))[:10],
-                "enlaces": []
+                "enlaces": [],
             },
             "ordenes_prioritarias": [],
             "_insumos": {"fuzzy_signals": fuzzy_signals},
         }
 
-    def _post_process_report(self, report: Dict[str, Any], ctx: Dict[str, Any],
-                             deterministic_orders: List[Dict[str, Any]],
-                             causal_traditional: List[str], causal_llm: List[str]) -> Dict[str, Any]:
+    def _post_process_report(
+        self,
+        report: Dict[str, Any],
+        ctx: Dict[str, Any],
+        deterministic_orders: List[Dict[str, Any]],
+        causal_traditional: List[str],
+        causal_llm: List[str],
+    ) -> Dict[str, Any]:
         if not isinstance(report, dict):
             return report
 
         # Asegura BSC.finanzas con KPIs reales
         bsc = report.get("bsc") if isinstance(report.get("bsc"), dict) else {}
         k = ctx.get("kpis", {})
-        dso = k.get("DSO"); dpo = k.get("DPO"); ccc = k.get("CCC")
+        dso = k.get("DSO")
+        dpo = k.get("DPO")
+        ccc = k.get("CCC")
         bsc["finanzas"] = [
             f"DSO: {dso:.1f}d" if isinstance(dso, (int, float)) else "DSO: N/D",
             f"DPO: {dpo:.1f}d" if isinstance(dpo, (int, float)) else "DPO: N/D",
@@ -360,7 +615,11 @@ class Agent(BaseAgent):
         if not isinstance(cz, dict):
             cz = {}
         cz_h = cz.get("hipotesis", [])
-        merged_h = list(dict.fromkeys((cz_h if isinstance(cz_h, list) else []) + (causal_traditional or []) + (causal_llm or [])))
+        merged_h = list(
+            dict.fromkeys(
+                (cz_h if isinstance(cz_h, list) else []) + (causal_traditional or []) + (causal_llm or [])
+            )
+        )
         cz["hipotesis"] = merged_h[:10]
         if not isinstance(cz.get("enlaces"), list):
             cz["enlaces"] = []
@@ -370,19 +629,20 @@ class Agent(BaseAgent):
         curr_orders = report.get("ordenes_prioritarias")
         if not isinstance(curr_orders, list):
             curr_orders = []
-        # dedup por título
         seen = set()
         merged_orders: List[Dict[str, Any]] = []
         for o in list(curr_orders) + deterministic_orders:
             title = (o or {}).get("title")
-            if not title or title in seen: continue
-            seen.add(title); merged_orders.append(o)
+            if not title or title in seen:
+                continue
+            seen.add(title)
+            merged_orders.append(o)
         report["ordenes_prioritarias"] = merged_orders
 
         # Sanitiza textos
         if isinstance(report.get("resumen_ejecutivo"), str):
             report["resumen_ejecutivo"] = self._sanitize_text(report["resumen_ejecutivo"])
-        for sec in ("hallazgos","riesgos","recomendaciones"):
+        for sec in ("hallazgos", "riesgos", "recomendaciones"):
             if isinstance(report.get(sec), list):
                 report[sec] = [self._sanitize_text(str(x)) for x in report[sec]]
 
@@ -397,6 +657,9 @@ class Agent(BaseAgent):
         period_in: Any = payload.get("period", state.period)
         trace: List[Dict[str, Any]] = payload.get("trace", []) or []
 
+        # 🔹 Contexto de empresa (llenado desde frontend → state.company_context)
+        company_context: Dict[str, Any] = getattr(state, "company_context", {}) or {}
+
         # 1) Resumen y métricas top-level
         resumen, metrics = self._summarize_trace(trace)
 
@@ -404,39 +667,123 @@ class Agent(BaseAgent):
         ctx = self._extract_context(trace)
         fuzzy_signals = self._build_fuzzy_signals(metrics)
 
+        # 🔹 Detectar si estamos en modo con datos (BD) o consultivo
+        has_data = self._has_hard_data(ctx, metrics)
+
         # 3) Causalidad tradicional (reglas + aging)
         try:
-            causal_traditional = causal_hypotheses(trace, ctx.get("aging_cxc") or {}, ctx.get("aging_cxp") or {})
+            causal_traditional = causal_hypotheses(
+                trace,
+                ctx.get("aging_cxc") or {},
+                ctx.get("aging_cxp") or {},
+            )
         except TypeError:
             causal_traditional = causal_hypotheses(trace)
 
         # 4) Órdenes deterministas (no dependen del LLM)
         det_orders = self._deterministic_orders(ctx, period_in)
 
-        # 5) LLM — instrucciones estrictas BSC + causalidad (SIN inventar números)
-        llm = get_chat_model()
-        system_prompt = build_system_prompt(self.name)
+        # 5) Reglas de la base de conocimiento específicas para AV_GERENTE
+        #    a) Métricas simples como input a la KB
+        metrics_for_kb = {
+            "dso": metrics.get("dso"),
+            "dpo": metrics.get("dpo"),
+            "ccc": metrics.get("ccc"),
+        }
+        metrics_for_kb = {k: v for k, v in metrics_for_kb.items() if v is not None}
 
-        guardrails = (
-            "REGLAS ESTRICTAS:\n"
-            "1) DATOS:\n"
-            "   • Usa SOLO los datos explícitos de 'context.kpis', 'context.balances' y 'context.aging_cxc/cxp'.\n"
-            "   • Si un dato no está presente, escribe 'N/D'.\n"
-            "2) Fuzzy:\n"
-            "   • 'fuzzy_signals' son cualitativos (low/mid/high). NO los uses como KPI ni los conviertas a valores numéricos.\n"
-            "3) Comparaciones intermensuales:\n"
-            "   • PROHIBIDO afirmar 'mejor/peor', 'al alza/a la baja', o comparar con 'el mes anterior' si NO existe 'context.prev_kpis'.\n"
-            "4) DPO y CCC (semántica correcta):\n"
-            "   • En este sistema: CCC = DSO − DPO. Un DPO alto, en aislamiento, TIENDE a mejorar (hacer más negativo) el CCC.\n"
-            "   • El riesgo con CxP proviene de tener AP VENCIDO (aging_cxp > 0), NO del nivel de DPO por sí mismo.\n"
-            "5) Aging:\n"
-            "   • 'vencido' = facturas con days_overdue > 0. NO llames 'por vencer' a lo que ya está vencido.\n"
-            "   • Usa explícitamente las sumas por buckets: 0_30, 31_60, 61_90, 90_plus.\n"
-            "6) Inventarios/DIO:\n"
-            "   • NO menciones inventario ni DIO ni los uses para causalidad si NO existe 'context.kpis.DIO' o datos de inventarios.\n"
-            "7) Salida:\n"
-            "   • Devuelve ÚNICAMENTE JSON VÁLIDO con la estructura indicada. Sin explicaciones, sin bloques <think>.\n"
+        #    b) Reglas precalculadas desde graph_lc (si existen)
+        kb_rules_global: Dict[str, Any] = (
+            payload.get("kb_rules")
+            or getattr(state, "kb_rules", {})
+            or {}
         )
+        precomputed_rules: List[Dict[str, Any]] = []
+        if isinstance(kb_rules_global, dict):
+            maybe = kb_rules_global.get(self.name)
+            if isinstance(maybe, list):
+                precomputed_rules = maybe
+
+        #    c) Reglas calculadas "en caliente" para av_gerente
+        rules_local = get_applicable_rules(
+            self.name,
+            metrics=metrics_for_kb,
+            text_query=question,
+        )
+
+        #    d) Merge de reglas (precalculadas + locales) deduplicando por id
+        kb_rules: List[Dict[str, Any]] = []
+        seen_ids = set()
+        for r in (precomputed_rules or []) + (rules_local or []):
+            if not isinstance(r, dict):
+                continue
+            rid = r.get("id")
+            if rid:
+                if rid in seen_ids:
+                    continue
+                seen_ids.add(rid)
+            kb_rules.append(r)
+
+        #    e) Ordenar reglas por prioridad (riesgo > operativo > consultivo/gerencial > otras)
+        kb_rules = sorted(kb_rules, key=self._rule_priority)
+
+        #    f) Asociar reglas a KPIs/situaciones
+        kb_rules_by_metric = self._associate_rules_with_kpis(kb_rules, ctx)
+
+        # 6) LLM — instrucciones estrictas BSC + causalidad + contexto empresa + KB
+        llm = get_chat_model()
+
+        base_system_prompt = build_system_prompt(self.name)
+        system_prompt = base_system_prompt + "\n\n" + SYSTEM_PROMPT_GERENTE_VIRTUAL
+
+        # 🔹 Guardrails distintos según si hay datos o no
+        if has_data:
+            guardrails = (
+                "REGLAS ESTRICTAS (MODO CON DATOS / BD):\n"
+                "1) DATOS:\n"
+                "   • Usa SOLO los datos explícitos de 'context.kpis', 'context.balances' y 'context.aging_cxc/cxp'.\n"
+                "   • Si un dato no está presente, escribe 'N/D'.\n"
+                "2) Fuzzy:\n"
+                "   • 'fuzzy_signals' son cualitativos (low/mid/high). NO los uses como KPI ni los conviertas a valores numéricos.\n"
+                "3) Comparaciones intermensuales:\n"
+                "   • PROHIBIDO afirmar 'mejor/peor', 'al alza/a la baja', o comparar con 'el mes anterior' si NO existe 'context.prev_kpis'.\n"
+                "4) DPO y CCC (semántica correcta):\n"
+                "   • En este sistema: CCC = DSO − DPO. Un DPO alto, en aislamiento, TIENDE a mejorar (hacer más negativo) el CCC.\n"
+                "   • El riesgo con CxP proviene de tener AP VENCIDO (aging_cxp > 0), NO del nivel de DPO por sí mismo.\n"
+                "5) Aging:\n"
+                "   • 'vencido' = facturas con days_overdue > 0. NO llames 'por vencer' a lo que ya está vencido.\n"
+                "   • Usa explícitamente las sumas por buckets: 0_30, 31_60, 61_90, 90_plus.\n"
+                "6) Inventarios/DIO:\n"
+                "   • NO menciones inventario ni DIO ni los uses para causalidad si NO existe 'context.kpis.DIO' o datos de inventarios.\n"
+                "7) Base de conocimiento:\n"
+                "   • Usa primero 'kb_rules_by_metric' cuando comentes un KPI específico (DSO, DPO, CCC, CxC_vencidas, CxP_vencidas).\n"
+                "   • Solo usa reglas de 'kb_rules' generales cuando no haya reglas específicas en 'kb_rules_by_metric' para ese tema.\n"
+                "   • Prioriza reglas de 'riesgo' o 'alerta' sobre reglas 'operativas', y estas sobre reglas 'consultivas/gerenciales'.\n"
+                "   • Cuando una recomendación derive claramente de una regla, menciona el id entre paréntesis (por ejemplo: 'según R_GE_LIQ_002').\n"
+                "8) Salida:\n"
+                "   • Devuelve ÚNICAMENTE JSON VÁLIDO con la estructura indicada. Sin explicaciones, sin bloques <think>.\n"
+            )
+        else:
+            guardrails = (
+                "REGLAS ESTRICTAS (MODO CONSULTIVO SIN BASE DE DATOS):\n"
+                "1) DATOS:\n"
+                "   • Asume que NO cuentas con KPIs numéricos confiables de la empresa.\n"
+                "   • NO inventes DSO, DPO, CCC ni balances. Si el usuario NO te da un valor explícito, usa 'N/D'.\n"
+                "   • Puedes referirte a rangos cualitativos (ej. 'ciclo de cobro lento', 'poca liquidez') pero sin números fabricados.\n"
+                "2) FUENTE PRINCIPAL:\n"
+                "   • Basa tu análisis en: (a) el texto de la pregunta, (b) el 'company_context' y (c) las reglas 'kb_rules' proporcionadas.\n"
+                "   • Úsalas como buenas prácticas para pymes/microempresas, con ejemplos sencillos (Excel, calendarios, controles básicos).\n"
+                "3) ENFOQUE:\n"
+                "   • Tu rol es de CONSULTOR: explica riesgos, prioridades y rutas de acción aunque no existan datos históricos.\n"
+                "   • Puedes sugerir qué datos debería empezar a registrar la empresa (CxC, CxP, flujo de caja, etc.).\n"
+                "4) BSC:\n"
+                "   • En 'bsc.finanzas' usa siempre KPIs como 'DSO: N/D', 'DPO: N/D', 'CCC: N/D' (el backend forzará estos valores si no hay datos).\n"
+                "5) Base de conocimiento:\n"
+                "   • Prioriza reglas de 'riesgo' o 'alerta' sobre las 'operativas' y 'consultivas'.\n"
+                "   • Menciona el id de la regla cuando ayude al gerente a entender la lógica (ej. 'según R_GE_003').\n"
+                "6) Salida:\n"
+                "   • Devuelve ÚNICAMENTE JSON VÁLIDO con la estructura indicada. Sin explicaciones, sin bloques <think>.\n"
+            )
 
         period_text, _ = self._period_text_and_due(period_in)
 
@@ -444,12 +791,26 @@ class Agent(BaseAgent):
             f"{guardrails}\n"
             f"Periodo: {period_text}\n"
             f"Pregunta: {question}\n\n"
-            f"== CONTEXTO ==\n"
+            f"== CONTEXTO NUMÉRICO ==\n"
             f"KPIs: {ctx.get('kpis')}\n"
             f"Aging CxC: {ctx.get('aging_cxc')}\n"
             f"Aging CxP: {ctx.get('aging_cxp')}\n"
             f"Balances: {ctx.get('balances')}\n\n"
+            f"== SEÑALES DIFUSAS (fuzzy_signals, solo cualitativas) ==\n"
+            f"{json.dumps(fuzzy_signals, ensure_ascii=False, indent=2)}\n\n"
+            f"== HIPÓTESIS CAUSALES DETERMINISTAS (causal_traditional) ==\n"
+            f"{json.dumps(causal_traditional, ensure_ascii=False, indent=2)}\n\n"
+            f"== CONTEXTO DE LA EMPRESA (company_context) ==\n"
+            f"{json.dumps(company_context, ensure_ascii=False, indent=2)}\n\n"
+            f"== REGLAS DE LA BASE DE CONOCIMIENTO ACTIVADAS PARA AV_GERENTE (kb_rules) ==\n"
+            f"{json.dumps(kb_rules, ensure_ascii=False, indent=2)}\n\n"
+            f"== REGLAS ASOCIADAS A KPIs Y SITUACIONES (kb_rules_by_metric) ==\n"
+            f"{json.dumps(kb_rules_by_metric, ensure_ascii=False, indent=2)}\n\n"
             f"Resumen de subagentes:\n{resumen}\n\n"
+            "Al redactar 'hallazgos', 'riesgos' y 'recomendaciones':\n"
+            "  • Usa primero las reglas de 'kb_rules_by_metric' vinculadas al KPI del que estás hablando.\n"
+            "  • Complementa con reglas generales de 'kb_rules' solo si aporta valor adicional.\n"
+            "  • Siempre que una frase venga directamente de una regla, referencia su id ('según R_...').\n\n"
             "Devuelve EXACTAMENTE este JSON:\n"
             "{\n"
             "  'resumen_ejecutivo': str,\n"
@@ -472,10 +833,12 @@ class Agent(BaseAgent):
 
         report_json = self._llm_json(llm, system_prompt, user_prompt)
 
-        # 6) Fallback si el LLM no devuelve JSON válido
+        # Fallback si el LLM no devuelve JSON válido
         if not isinstance(report_json, dict):
             fallback = self._fallback_report(ctx, fuzzy_signals, causal_traditional, [])
-            fallback["ordenes_prioritarias"] = det_orders  # inserta órdenes deterministas
+            fallback["ordenes_prioritarias"] = det_orders
+            # También reflejamos qué reglas estaban activas en este caso
+            fallback["applied_rules"] = kb_rules
             return {
                 "executive_decision_bsc": fallback,
                 "question": question,
@@ -485,13 +848,20 @@ class Agent(BaseAgent):
                 "fuzzy_signals": fuzzy_signals,
                 "causal_hypotheses": causal_traditional,
                 "causal_hypotheses_llm": [],
-                "_meta": {"structured": True, "llm_ok": False},
+                "_meta": {"structured": True, "llm_ok": False, "has_data": has_data},
             }
 
-        # 7) Post-proceso: fuerza BSC.finanzas con KPIs reales + une causalidad + añade órdenes deterministas
+        # Post-proceso
         final_report = self._post_process_report(
-            report_json, ctx, det_orders, causal_traditional, report_json.get("causalidad", {}).get("hipotesis", [])
+            report_json,
+            ctx,
+            det_orders,
+            causal_traditional,
+            report_json.get("causalidad", {}).get("hipotesis", []),
         )
+
+        # 🔹 Exponer explícitamente qué reglas se consideraron/aplicaron para este caso
+        final_report["applied_rules"] = kb_rules
 
         return {
             "executive_decision_bsc": final_report,
@@ -502,5 +872,5 @@ class Agent(BaseAgent):
             "fuzzy_signals": fuzzy_signals,
             "causal_hypotheses": causal_traditional,
             "causal_hypotheses_llm": final_report.get("causalidad", {}).get("hipotesis", []),
-            "_meta": {"structured": True, "llm_ok": True},
+            "_meta": {"structured": True, "llm_ok": True, "has_data": has_data},
         }

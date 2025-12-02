@@ -1,0 +1,980 @@
+version: "1.0"
+domain: "gerente_virtual_kb"
+
+agents:
+
+  ##########################################################################
+  # AV GERENTE
+  ##########################################################################
+  av_gerente:
+
+    concepts:
+      gerente_definicion:
+        title: "Rol del gerente en la pyme"
+        text: >
+          El gerente es responsable de dirigir la empresa, tomar decisiones
+          estratégicas y liderar la organización para alcanzar sus objetivos.
+          Su efectividad depende de su relación con el tiempo, el conocimiento
+          y la cultura del dinero.
+
+      entropia_en_pymes:
+        title: "Entropía en las pymes"
+        text: >
+          La entropía representa el desorden en la empresa. A mayor entropía,
+          mayor fricción, errores, retrabajos y menor productividad. El AV
+          Gerente debe buscar reducir la entropía mediante procesos claros,
+          roles definidos y métricas de gestión.
+
+      leyes_newton_negocios:
+        title: "Leyes de Newton aplicadas al negocio"
+        text: >
+          El negocio tiende a continuar como está (inercia) a menos que una
+          fuerza externa lo cambie. La aceleración del crecimiento depende de
+          las fuerzas aplicadas (innovación, inversión, talento) y de la masa
+          del negocio (estructura, cultura). Toda acción tiene una reacción:
+          decisiones financieras y operativas generan efectos medibles.
+
+      tipos_innovacion:
+        title: "Innovación eficiente, sostenida y transformativa"
+        text: >
+          La innovación eficiente mejora el modelo actual (procesos, costos,
+          propuestas de valor). La innovación sostenida expande el modelo
+          existente a nuevos segmentos, canales o mercados. La innovación
+          transformativa crea modelos radicalmente nuevos y de mayor riesgo.
+
+    rules:
+      - id: R_GE_001
+        name: "Perfil de gerente con alta entropía personal"
+        scope: ["gerente_espejo"]
+        conditions:
+          - dimension: "conducta_tiempo"
+            level: "bajo"
+          - dimension: "conducta_conocimiento"
+            level: "bajo"
+          - dimension: "conducta_dinero"
+            level: "bajo"
+        recommendation:
+          short: "El gerente requiere ordenar su gestión personal antes de escalar."
+          detailed: >
+            Un perfil con baja valoración del tiempo, conocimiento y cultura
+            del dinero indica alta entropía personal. El AV Gerente debe
+            recomendar organización básica de agenda, registro de decisiones,
+            educación financiera y hábitos de seguimiento antes de asumir
+            proyectos complejos.
+        tags: ["entropia", "gerente", "organizacion_personal"]
+        audience: ["gerente"]
+
+      - id: R_GE_002
+        name: "Pyme con alta entropía organizacional"
+        scope: ["contexto_pyme"]
+        triggers:
+          keywords: ["desorden", "caos", "muchos problemas", "no hay tiempo"]
+        recommendation:
+          short: "Reducir fricción interna antes de modelos avanzados."
+          detailed: >
+            Si la empresa presenta síntomas de desorden, falta de procesos y
+            constantes emergencias, el AV Gerente debe priorizar la reducción
+            de fricción (procesos básicos, responsabilidades claras, tableros
+            simples) antes de implementar modelos como CMI, ASG o proyectos de
+            innovación transformativa.
+        tags: ["entropia", "procesos", "operacion"]
+        audience: ["gerente"]
+
+      - id: R_GE_003
+        name: "Pyme enfocada solo en explotación"
+        scope: ["innovacion"]
+        conditions:
+          - metric: "nivel_explotacion"
+            op: ">="
+            value: 0.7
+          - metric: "nivel_exploracion"
+            op: "<"
+            value: 0.3
+        recommendation:
+          short: "Iniciar innovación eficiente antes que transformativa."
+          detailed: >
+            Cuando la empresa dedica casi toda su energía a operar el negocio
+            actual y no explora nuevas opciones, el AV Gerente debe impulsar
+            primero innovaciones eficientes: mejorar procesos, reducir costos,
+            perfeccionar la propuesta de valor existente, antes de arriesgarse
+            con modelos completamente nuevos.
+        tags: ["innovacion", "eficiente", "explotacion"]
+        audience: ["gerente"]
+
+      - id: R_GE_LIQ_001
+        name: "CCC elevado para una pyme"
+        scope: ["liquidez", "riesgo"]
+        conditions:
+          - metric: "ccc"
+            op: ">"
+            value: 10
+        recommendation:
+          short: "CCC mayor a 10 días: vigilar la presión de caja."
+          detailed: >
+            Un ciclo de conversión de efectivo (CCC) superior a 10 días indica
+            que el dinero tarda más en regresar a caja. El AV Gerente debe
+            priorizar acciones en cobranza (DSO) y negociación de plazos con
+            proveedores (DPO), y revisar gastos no esenciales para aliviar la
+            presión de liquidez.
+        tags: ["ccc", "liquidez", "riesgo"]
+        audience: ["gerente"]
+
+      - id: R_GE_LIQ_002
+        name: "DPO muy bajo: pagos demasiado rápidos"
+        scope: ["liquidez", "operativo"]
+        conditions:
+          - metric: "dpo"
+            op: "<="
+            value: 5
+        recommendation:
+          short: "Se paga demasiado rápido a proveedores."
+          detailed: >
+            Un DPO cercano a 0 días significa que la empresa paga casi de
+            contado a sus proveedores. Esto puede ser positivo para la
+            relación comercial, pero reduce liquidez. El AV Gerente debe
+            recomendar negociar plazos de pago razonables (por ejemplo 15–30
+            días) con los proveedores clave, siempre alineado con el ciclo
+            de cobro a clientes (DSO).
+        tags: ["dpo", "proveedores", "liquidez"]
+        audience: ["gerente"]
+
+    pathways:
+      innovacion_eficiente:
+        description: "Ruta para pymes que operan, pero no innovan."
+        entry_criteria:
+          from_rules: ["R_GE_003"]
+        steps:
+          - "Diagnosticar procesos clave y eliminar fricción (bajar entropía)."
+          - "Mejorar el modelo actual: tiempos, costos, calidad del servicio."
+          - "Definir 1–2 proyectos de mejora de impacto directo."
+          - "Medir resultados y documentar aprendizajes."
+
+      innovacion_sostenida:
+        description: "Ruta para pymes con base operativa sólida."
+        entry_criteria:
+          required_state: "baja_entropia_operativa"
+        steps:
+          - "Explorar nuevos segmentos o nichos del mismo mercado."
+          - "Probar canales adicionales de venta o distribución."
+          - "Ajustar precios, empaques o servicios complementarios."
+          - "Medir rentabilidad de cada iniciativa."
+
+      innovacion_transformativa:
+        description: "Ruta para pymes con alta capacidad gerencial y apetito de riesgo."
+        entry_criteria:
+          manual: true
+        steps:
+          - "Explorar modelos de negocio radicalmente distintos."
+          - "Validar ideas en pequeño antes de grandes inversiones."
+          - "Buscar alianzas, capital de riesgo o programas de apoyo."
+          - "Monitorear impacto financiero y operativo."
+
+  ##########################################################################
+  # AV ADMINISTRATIVO
+  ##########################################################################
+  av_administrativo:
+
+    concepts:
+      definicion_administracion:
+        title: "Administración en la pyme"
+        text: >
+          La administración planifica, organiza, dirige y controla los recursos
+          de la empresa para lograr sus objetivos. El AV Administrativo se
+          enfoca en mejorar productividad mediante el uso eficiente de capital,
+          mano de obra, tiempo, tecnología y conocimiento.
+
+      productividad_modelo:
+        title: "Productividad como KPI central"
+        text: >
+          La productividad es la relación entre salida (bienes o servicios) e
+          insumos (recursos). Aumentarla implica producir más con los mismos
+          recursos o lo mismo con menos recursos, sin deteriorar la calidad.
+
+      mcvu_concepto:
+        title: "Modelo Costo-Volumen-Utilidad (MCVU)"
+        text: >
+          El MCVU analiza cómo cambian las utilidades cuando varían precios,
+          costos y volumen. Es base para calcular punto de equilibrio, margen
+          de contribución y planeación de utilidades.
+
+    rules:
+      - id: R_ADMIN_001
+        name: "Pyme sin contabilidad formal"
+        scope: ["adm", "productividad"]
+        triggers:
+          keywords: ["no tengo datos", "no llevo contabilidad", "no sé mis costos"]
+        recommendation:
+          short: "Aplicar MCVU consultivo con valores declarados por el dueño."
+          detailed: >
+            Si la pyme no tiene contabilidad formal, el AV Administrativo debe
+            trabajar con información proporcionada por el dueño (precios,
+            costos variables y costos fijos aproximados) para construir un
+            MCVU básico y orientar decisiones.
+        tags: ["mcvu", "sin_datos"]
+
+      - id: R_ADMIN_002
+        name: "Costos fijos altos → riesgo elevado"
+        scope: ["adm", "riesgo"]
+        conditions:
+          - metric: "costos_fijos_relativos"
+            op: ">"
+            value: 0.5
+        recommendation:
+          short: "Reducir gastos fijos y evitar compromisos innecesarios."
+          detailed: >
+            Más del 50% de la estructura de costos en rubros fijos incrementa
+            el riesgo operativo. El AV debe recomendar revisar alquileres,
+            planillas, gastos administrativos y decisiones basadas en estatus.
+        tags: ["costos_fijos", "riesgo"]
+
+      - id: R_ADMIN_003
+        name: "Margen de contribución insuficiente"
+        scope: ["adm", "ventas"]
+        conditions:
+          - metric: "margen_contribucion"
+            op: "<"
+            value: 0.2
+        recommendation:
+          short: "Revisar precios y costos variables."
+          detailed: >
+            Un margen de contribución menor al 20% hace vulnerable el negocio.
+            El AV debe sugerir mejorar negociación con proveedores, optimizar
+            costos variables o revisar la estrategia de precios.
+        tags: ["mcu", "costos", "precios"]
+
+      - id: R_ADMIN_004
+        name: "Varias líneas de producto sin control"
+        scope: ["adm", "productividad"]
+        triggers:
+          keywords: ["varias líneas", "muchos productos", "categorías", "sucursales"]
+        recommendation:
+          short: "Aplicar punto de equilibrio por línea o categoría."
+          detailed: >
+            Cuando la empresa maneja varias líneas, el AV Administrativo debe
+            calcular el punto de equilibrio y margen de contribución por
+            categoría, sucursal o zona, para detectar cuáles generan valor y
+            cuáles destruyen rentabilidad.
+        tags: ["punto_equilibrio_multiple", "mcpp"]
+
+    formulas:
+      punto_equilibrio:
+        formula: "unidades_equilibrio = CF / (PV - CV)"
+        variables:
+          PV: "Precio de venta unitario sin impuestos"
+          CV: "Costo variable unitario"
+          CF: "Costos fijos totales"
+
+      unidades_utilidad_deseada:
+        formula: "unidades = (CF + UtilidadDeseada) / (PV - CV)"
+
+      mcpp:
+        formula: "MCPP = sum(MCU_i * participacion_i)"
+
+    pathways:
+      productividad_basica:
+        description: "Ruta cuando la pyme necesita mejorar eficiencia básica."
+        entry_criteria:
+          from_rules: ["R_ADMIN_001"]
+        steps:
+          - "Identificar PV, CV y CF de los principales productos."
+          - "Calcular punto de equilibrio simple."
+          - "Revisar estructura de costos fijos y variables."
+          - "Definir acciones para aumentar MCU o reducir CF."
+
+      productividad_multi_linea:
+        description: "Ruta para pymes con múltiples líneas de producto."
+        entry_criteria:
+          from_rules: ["R_ADMIN_004"]
+        steps:
+          - "Listar líneas/categorías y sus ventas."
+          - "Calcular MCU por línea."
+          - "Calcular MCPP."
+          - "Clasificar líneas en rentables y no rentables."
+          - "Proponer decisiones: potenciar, ajustar o cerrar líneas."
+
+  ##########################################################################
+  # AAAV CxP
+  ##########################################################################
+  aaav_cxp:
+
+    concepts:
+      definicion_cxp:
+        title: "Naturaleza de las Cuentas por Pagar"
+        text: >
+          Las Cuentas por Pagar representan obligaciones de corto plazo con
+          proveedores de bienes y servicios. Son parte del pasivo corriente y
+          constituyen una fuente de financiamiento comercial.
+
+      informes_cxp:
+        title: "Informes automáticos del AAAV CxP"
+        text: >
+          El agente debe generar un informe semanal (lunes 6am) con CxP que
+          vencen en la semana y un informe mensual el primer día hábil, con
+          todas las CxP que vencerán en el mes, para alimentar el Flujo de
+          Efectivo Proyectado.
+
+      envejecimiento_cxp:
+        title: "Envejecimiento de CxP"
+        text: >
+          El envejecimiento de CxP mide en días cuánto tarda la empresa en
+          pagar a sus proveedores, usando la relación entre CxP del mes y
+          compras acumuladas.
+
+    rules:
+      - id: R_CXP_001
+        name: "Generar reporte semanal de vencimientos"
+        scope: ["operativo"]
+        triggers:
+          schedule: "lunes_06_00"
+        recommendation:
+          short: "Emitir reporte de CxP que vencen esta semana."
+          detailed: >
+            El informe debe listar proveedor, factura, fecha de emisión,
+            fecha de vencimiento ajustada, monto y observaciones, para
+            planificar pagos de lunes a viernes.
+        tags: ["vencimientos", "reporte_semanal"]
+
+      - id: R_CXP_002
+        name: "Generar reporte mensual de vencimientos"
+        scope: ["operativo"]
+        triggers:
+          schedule: "primer_dia_habil_mes"
+        recommendation:
+          short: "Emitir reporte mensual de CxP del mes."
+          detailed: >
+            El informe mensual debe incluir todas las obligaciones con fecha
+            de vencimiento dentro del mes calendario y alimentar el flujo de
+            efectivo proyectado.
+        tags: ["vencimientos", "reporte_mensual"]
+
+      - id: R_CXP_003
+        name: "Riesgo por alargamiento de pagos"
+        scope: ["riesgo"]
+        conditions:
+          - metric: "dias_atraso_promedio"
+            op: ">"
+            value: 8
+        recommendation:
+          short: "Informar a proveedores y evitar deterioro crediticio."
+          detailed: >
+            Un atraso promedio superior a 8 días sobre el estándar sectorial
+            indica riesgo alto. El agente debe recomendar comunicación
+            proactiva con proveedores y reprogramación formal de pagos.
+        tags: ["alargamiento", "riesgo"]
+
+      - id: R_CXP_004
+        name: "Riesgo moderado por envejecimiento"
+        scope: ["riesgo"]
+        conditions:
+          - metric: "dias_envejecimiento"
+            op: ">="
+            value: 1
+          - metric: "dias_envejecimiento"
+            op: "<="
+            value: 7
+        recommendation:
+          short: "Monitorear pagos y prever flujo."
+          detailed: >
+            Un envejecimiento entre 1 y 7 días se considera riesgo medio. El
+            agente debe sugerir ajustes de compras y mejora en planeación de
+            pagos para prevenir mora.
+        tags: ["envejecimiento", "riesgo"]
+
+      - id: R_CXP_005
+        name: "CxP vencidas → acción inmediata"
+        scope: ["alerta"]
+        conditions:
+          - metric: "monto_cxp_vencidas"
+            op: ">"
+            value: 0
+        recommendation:
+          short: "Priorizar pagos vencidos o reprogramarlos."
+          detailed: >
+            Las CxP vencidas afectan reputación y pueden generar recargos. El
+            agente debe recomendar priorizar estos pagos o negociar nuevas
+            condiciones.
+        tags: ["cxp_vencidas", "alerta"]
+
+      - id: R_CXP_010
+        name: "CxP vencidas sin presupuesto para pagar"
+        scope: ["tactico", "liquidez"]
+        triggers:
+          keywords:
+            - "no tengo presupuesto"
+            - "no puedo pagar a proveedores"
+            - "cxp vencida"
+            - "proveedores molestos"
+        conditions:
+          - metric: "monto_cxp_vencidas"
+            op: ">"
+            value: 0
+        recommendation:
+          short: "Repriorizar pagos y renegociar con proveedores clave."
+          detailed: >
+            Cuando existen CxP vencidas y no hay presupuesto suficiente, la
+            empresa debe priorizar: 1) Proveedores críticos para la operación
+            (insumos, servicios básicos), 2) Negociar plazos y refinanciamiento
+            con los 3 a 5 proveedores más relevantes, 3) Congelar gastos no
+            esenciales durante el periodo crítico.
+        tags: ["cxp_vencidas", "liquidez", "renegociacion"]
+
+    formulas:
+      envejecimiento_cxp:
+        formula: "dias = (cxp_mes * 365) / compras_anuales"
+
+      ratio_cxc_cxp:
+        formula: "ratio = cxc_total / cxp_total"
+
+      vencimiento:
+        formula: "fecha_vencimiento = fecha_emision + dias_credito"
+
+      vencimiento_ajustado:
+        rule: "Si cae sábado o domingo, mover al lunes siguiente."
+
+    pathways:
+      flujo_operativo:
+        description: "Ruta para manejo operativo de vencimientos."
+        entry_criteria:
+          from_rules: ["R_CXP_001", "R_CXP_002"]
+        steps:
+          - "Listar vencimientos por proveedor."
+          - "Ajustar fechas por fin de semana."
+          - "Clasificar por monto e importancia."
+          - "Planificar pagos según flujo de caja."
+
+      riesgo_cxp:
+        description: "Ruta para alto riesgo de CxP."
+        entry_criteria:
+          from_rules: ["R_CXP_003", "R_CXP_005", "R_CXP_010"]
+        steps:
+          - "Identificar proveedores críticos."
+          - "Comunicar atrasos y negociar condiciones."
+          - "Revisar dependencia de financiamiento de proveedores."
+          - "Actualizar flujo de efectivo proyectado."
+
+  ##########################################################################
+  # AAAV CxC
+  ##########################################################################
+  aaav_cxc:
+
+    concepts:
+      definicion_cxc:
+        title: "Naturaleza de las Cuentas por Cobrar"
+        text: >
+          Las Cuentas por Cobrar son derechos de cobro derivados de ventas de
+          bienes o servicios a crédito. Representan dinero que la empresa
+          espera recibir en el corto plazo y forman parte del activo corriente.
+
+      tipos_cxc:
+        title: "CxC comerciales y no comerciales"
+        text: >
+          Las CxC comerciales provienen de ventas a clientes; las no
+          comerciales incluyen préstamos y anticipos a empleados u otras
+          transacciones internas. Es útil separarlas en los informes.
+
+      vencimientos_cxc:
+        title: "Plazos y vencimientos de CxC"
+        text: >
+          Los plazos de crédito suelen expresarse en días calendario
+          (7, 15, 30, 45, 60, 90). La fecha de vencimiento se calcula como
+          fecha de emisión más días de crédito. Si cae en fin de semana,
+          se corre al lunes siguiente.
+
+      alargamiento_cxc:
+        title: "Alargamiento de CxC"
+        text: >
+          El alargamiento de CxC ocurre cuando los clientes pagan después de
+          la fecha comprometida. Afecta liquidez y calificación crediticia.
+          Debe medirse y registrarse como indicador clave.
+
+      envejecimiento_cxc:
+        title: "Envejecimiento de CxC"
+        text: >
+          El envejecimiento de CxC mide qué tan tarde está cobrando la
+          empresa comparado con el estándar sectorial. Se basa en la CxC a
+          una fecha y las compras o ventas acumuladas del periodo.
+
+    rules:
+      - id: R_CXC_001
+        name: "Generar reporte semanal de vencimientos de CxC"
+        scope: ["operativo"]
+        triggers:
+          schedule: "lunes_06_00"
+        recommendation:
+          short: "Emitir reporte de CxC que vencen esta semana."
+          detailed: >
+            El informe debe mostrar cliente, factura, fecha de emisión, fecha
+            de vencimiento ajustada y monto, para organizar la cobranza de
+            lunes a viernes.
+        tags: ["vencimientos", "cxc", "reporte_semanal"]
+
+      - id: R_CXC_002
+        name: "Generar reporte mensual de vencimientos de CxC"
+        scope: ["operativo"]
+        triggers:
+          schedule: "primer_dia_habil_mes"
+        recommendation:
+          short: "Emitir reporte mensual de CxC del mes."
+          detailed: >
+            El reporte mensual debe incluir todas las facturas que vencerán en
+            el mes y servir como insumo del Flujo de Efectivo Proyectado.
+        tags: ["vencimientos", "cxc", "reporte_mensual"]
+
+      - id: R_CXC_003
+        name: "Envejecimiento de CxC alto"
+        scope: ["riesgo"]
+        conditions:
+          - metric: "dias_envejecimiento_cxc"
+            op: ">"
+            value: 8
+        recommendation:
+          short: "Riesgo alto: clientes pagando mucho más tarde que el sector."
+          detailed: >
+            Si el envejecimiento de CxC supera en más de 8 días el estándar
+            sectorial, el agente debe recomendar fortalecer políticas de
+            crédito, cobranza y monitoreo de morosidad.
+        tags: ["envejecimiento", "riesgo", "morosidad"]
+
+      - id: R_CXC_004
+        name: "Relación CxC/CxP favorable"
+        scope: ["liquidez"]
+        conditions:
+          - metric: "ratio_cxc_cxp"
+            op: ">"
+            value: 1.0
+        recommendation:
+          short: "Activo de corto plazo mayor que pasivo."
+          detailed: >
+            Un ratio CxC/CxP mayor que 1 indica que el activo de corto plazo
+            por cobrar supera las obligaciones de corto plazo. El AV puede
+            mostrar esto como fortaleza, pero siempre vigilando la morosidad.
+        tags: ["liquidez", "ratio"]
+
+      - id: R_CXC_005
+        name: "CxC vencidas significativas"
+        scope: ["alerta"]
+        conditions:
+          - metric: "monto_cxc_vencidas"
+            op: ">"
+            value: 0
+        recommendation:
+          short: "Acción inmediata sobre CxC vencidas."
+          detailed: >
+            El agente debe recomendar priorizar contactos con clientes,
+            establecer acuerdos de pago, bloquear temporalmente crédito y
+            reportar el monto total de CxC vencidas para el Flujo de Efectivo.
+        tags: ["cxc_vencidas", "alerta"]
+
+      - id: R_CXC_006
+        name: "Sin control de CxC"
+        scope: ["consultivo"]
+        triggers:
+          keywords: ["no llevo control", "no tengo calendario de cobros", "no tengo archivo cxc"]
+        recommendation:
+          short: "Implementar control básico de CxC."
+          detailed: >
+            Si la empresa no lleva control de sus cuentas por cobrar, el
+            agente debe sugerir un calendario simple con cliente, factura,
+            fecha de emisión, días de crédito, fecha de vencimiento y estado
+            para mejorar la gestión de cobro.
+        tags: ["sin_datos", "control_basico"]
+
+      - id: R_CXC_010
+        name: "CxC vencidas significativas (modo consultivo)"
+        scope: ["tactico", "liquidez"]
+        triggers:
+          keywords:
+            - "cxc vencida"
+            - "clientes no pagan"
+            - "morosidad"
+            - "atraso en cobro"
+            - "más de 60 días"
+        conditions:
+          - metric: "monto_cxc_vencidas"
+            op: ">"
+            value: 0
+        recommendation:
+          short: "Actuar de inmediato sobre las cuentas por cobrar vencidas."
+          detailed: >
+            Cuando el monto de CxC vencidas es mayor que cero, la empresa debe
+            priorizar la cobranza de esos clientes. Segmentar top-10 deudores,
+            establecer acuerdos de pago y considerar la suspensión temporal de
+            crédito a quienes superen los 60 días de atraso.
+        tags: ["cxc_vencidas", "liquidez", "morosidad"]
+
+      - id: R_CXC_011
+        name: "Envejecimiento CxC alto (61-90+ días)"
+        scope: ["tactico", "riesgo_credito"]
+        triggers:
+          keywords:
+            - "más de 60 días"
+            - "clientes atrasados"
+            - "no me han pagado"
+        conditions:
+          - metric: "dias_envejecimiento_cxc"
+            op: ">"
+            value: 60
+        recommendation:
+          short: "Revisar política de crédito y castigo de cartera."
+          detailed: >
+            Un envejecimiento promedio de CxC superior a 60 días indica que la
+            política de crédito y cobranza no es efectiva. Se recomienda revisar
+            límites de crédito, plazos, requisitos de garantía y aplicar dunning
+            escalonado (recordatorios, llamadas, visitas, acuerdos formales).
+        tags: ["envejecimiento", "riesgo_credito", "politica_credito"]
+
+    formulas:
+      vencimiento_cxc:
+        formula: "fecha_vencimiento = fecha_emision + dias_credito"
+
+      vencimiento_ajustado_cxc:
+        rule: "Si fecha_vencimiento es sábado o domingo, mover al lunes."
+
+      envejecimiento_cxc:
+        formula: "dias = (cxc_mes * 365) / compras_o_ventas_anuales"
+
+      ratio_cxc_cxp:
+        formula: "ratio = cxc_total / cxp_total"
+
+    pathways:
+      cobranza_preventiva:
+        description: "Ruta para cobrar antes del vencimiento."
+        entry_criteria:
+          from_rules: ["R_CXC_001", "R_CXC_002"]
+        steps:
+          - "Listar CxC próximas a vencer."
+          - "Contactar clientes antes de la fecha límite."
+          - "Registrar compromisos de pago."
+          - "Actualizar estado de facturas."
+
+      gestion_morosidad:
+        description: "Ruta para manejar CxC vencidas."
+        entry_criteria:
+          from_rules: ["R_CXC_003", "R_CXC_005", "R_CXC_010", "R_CXC_011"]
+        steps:
+          - "Segmentar clientes morosos por monto y días en atraso."
+          - "Definir acciones: llamada, correo, visita, arreglos de pago."
+          - "Considerar bloqueo de crédito según política."
+          - "Actualizar indicadores de morosidad y flujo de caja."
+
+  ##########################################################################
+  # AV FINANZAS
+  ##########################################################################
+  av_finanzas:
+
+    concepts:
+      flujo_caja_proyectado:
+        title: "Flujo de Caja Proyectado"
+        text: >
+          Es la estimación de ingresos y egresos futuros de la empresa en
+          períodos definidos. Permite anticipar si habrá suficiente liquidez
+          para cumplir con obligaciones y tomar decisiones de inversión o
+          financiamiento.
+
+      liquidez:
+        title: "Liquidez financiera"
+        text: >
+          La liquidez es la capacidad de la empresa para pagar sus obligaciones
+          de corto plazo. Depende de los saldos de caja, la velocidad de cobro
+          de CxC y la programación de CxP.
+
+      ciclo_caja:
+        title: "Ciclo de caja"
+        text: >
+          Es el tiempo que tarda el dinero en salir por pagos a proveedores y
+          regresar vía cobros a clientes. Un ciclo largo exige más capital de
+          trabajo o financiamiento.
+
+    rules:
+      - id: R_FIN_001
+        name: "Flujo neto negativo en un periodo"
+        scope: ["liquidez", "alerta"]
+        triggers:
+          keywords:
+            - "liquidez"
+            - "flujo de caja"
+            - "no alcanza la caja"
+            - "problemas de liquidez"
+        conditions:
+          - metric: "flujo_neto"
+            op: "<"
+            value: 0
+        recommendation:
+          short: "Déficit proyectado: revisar egresos y reprogramar pagos."
+          detailed: >
+            Si los egresos proyectados superan los ingresos, el AV Finanzas
+            debe recomendar recortar o diferir gastos, renegociar CxP y buscar
+            opciones para aumentar ingresos.
+        tags: ["deficit", "liquidez_baja"]
+
+      - id: R_FIN_002
+        name: "Superávit proyectado"
+        scope: ["liquidez", "oportunidad"]
+        conditions:
+          - metric: "flujo_neto"
+            op: ">"
+            value: 0
+        recommendation:
+          short: "Superávit: evaluar inversión o reducción de deuda."
+          detailed: >
+            Un flujo positivo permite a la empresa fortalecer caja, adelantar
+            pagos de deudas caras o invertir en proyectos productivos.
+        tags: ["superavit", "oportunidad"]
+
+      - id: R_FIN_003
+        name: "Saldo final proyectado peligroso"
+        scope: ["liquidez"]
+        conditions:
+          - metric: "saldo_final"
+            op: "<"
+            value: 50000
+        recommendation:
+          short: "Saldo de caja muy bajo."
+          detailed: >
+            Un saldo final por debajo del mínimo operativo indica riesgo de no
+            poder cubrir imprevistos. El agente debe recomendar reforzar la
+            caja, retrasar gastos no críticos o buscar apoyo financiero.
+        tags: ["caja_baja", "riesgo"]
+
+      - id: R_FIN_004
+        name: "Egresos proyectados mayores que ingresos"
+        scope: ["gasto"]
+        conditions:
+          - metric: "egresos"
+            op: ">"
+            value: "ingresos"
+        recommendation:
+          short: "Egresos superan ingresos: ajustar plan."
+          detailed: >
+            Los egresos no deberían superar sistemáticamente los ingresos
+            proyectados. Es necesario revisar gastos, inversiones y calendario
+            de pagos para asegurar viabilidad.
+        tags: ["egresos_altos", "desbalance"]
+
+      - id: R_FIN_006
+        name: "Flujo inestable entre trimestres"
+        scope: ["riesgo"]
+        conditions:
+          - metric: "variacion_trimestral"
+            op: ">"
+            value: 0.30
+        recommendation:
+          short: "Alta variabilidad: revisar estacionalidad."
+          detailed: >
+            Si el flujo difiere más de 30% entre trimestres, la empresa
+            enfrenta riesgo de estacionalidad o decisiones erráticas. Debe
+            preparar reservas y planificar mejor los egresos.
+        tags: ["variabilidad", "riesgo_estacional"]
+
+    formulas:
+      flujo_neto:
+        formula: "flujo_neto = ingresos - egresos"
+
+      saldo_final:
+        formula: "saldo_final = saldo_inicial + flujo_neto"
+
+      variacion_trimestral:
+        formula: "variacion = (flujo_t2 - flujo_t1) / flujo_t1"
+
+    pathways:
+      deficit_financiero:
+        description: "Ruta para corregir déficit proyectado."
+        entry_criteria:
+          from_rules: ["R_FIN_001"]
+        steps:
+          - "Identificar egresos no esenciales."
+          - "Reprogramar o recortar gastos diferibles."
+          - "Negociar plazos con proveedores."
+          - "Explorar opciones de ingreso adicional o financiamiento."
+
+      superavit_estrategico:
+        description: "Ruta cuando hay superávit sostenible."
+        entry_criteria:
+          from_rules: ["R_FIN_002"]
+        steps:
+          - "Fortalecer caja con reservas."
+          - "Evaluar pago anticipado de deudas caras."
+          - "Analizar oportunidades de inversión de bajo riesgo."
+          - "Planear inversiones en productividad."
+
+      riesgo_estacionalidad:
+        description: "Ruta para flujos muy variables."
+        entry_criteria:
+          from_rules: ["R_FIN_006"]
+        steps:
+          - "Mapear meses de alta y baja."
+          - "Crear fondo de reserva para meses débiles."
+          - "Alinear compras y gastos a la estacionalidad."
+          - "Planificar ventas para compensar periodos críticos."
+
+  ##########################################################################
+  # AV CONTADOR-FINANCIERO
+  ##########################################################################
+  av_contador_financiero:
+
+    concepts:
+      rol_contador_financiero:
+        title: "Rol del AV Contador-Financiero"
+        text: >
+          Este agente recibe del contador externo los estados financieros
+          oficiales (NIIF PYMES) y declara impuestos. Su función es convertir
+          estos documentos en resúmenes gerenciales útiles para otros agentes.
+
+      documentos_requeridos:
+        title: "Documentos contables obligatorios"
+        text: >
+          Estado de Resultado, Estado de Situación, Estado de Flujo de Efectivo,
+          declaración de impuesto mensual y declaración de renta anual.
+
+    rules:
+      - id: R_CF_001
+        name: "Utilidad operativa negativa"
+        scope: ["finanzas", "alerta"]
+        conditions:
+          - metric: "utilidad_operativa"
+            op: "<"
+            value: 0
+        recommendation:
+          short: "Empresa operando con pérdida."
+          detailed: >
+            Ingresos insuficientes para cubrir costos y gastos. El agente debe
+            recomendar revisión de estructura de costos, gastos y modelo de
+            ingresos.
+        tags: ["utilidad_negativa", "riesgo"]
+
+      - id: R_CF_002
+        name: "Disminución de activos corrientes"
+        scope: ["riesgo"]
+        conditions:
+          - metric: "variacion_activos_corrientes"
+            op: "<"
+            value: 0
+        recommendation:
+          short: "Activos corrientes se reducen."
+          detailed: >
+            Menos activos corrientes implica menor capacidad de pago. Se debe
+            revisar caja, CxC e inventarios.
+        tags: ["liquidez", "variacion"]
+
+      - id: R_CF_004
+        name: "Capital de trabajo negativo"
+        scope: ["liquidez"]
+        conditions:
+          - metric: "capital_trabajo"
+            op: "<"
+            value: 0
+        recommendation:
+          short: "Capital de trabajo insuficiente."
+          detailed: >
+            Cuando pasivos corrientes superan los activos corrientes hay riesgo
+            de liquidez inmediata. El agente debe recomendar mejorar cobranzas,
+            reducir inventario y negociar plazos de pago.
+        tags: ["capital_trabajo_negativo", "riesgo"]
+
+    formulas:
+      utilidad_operativa:
+        formula: "utilidad_operativa = total_ingresos - total_costos - gastos_administrativos"
+
+      razon_corriente:
+        formula: "razon_corriente = activos_corrientes / pasivos_corrientes"
+
+      capital_trabajo:
+        formula: "capital_trabajo = activos_corrientes - pasivos_corrientes"
+
+      margen_operativo:
+        formula: "margen_operativo = utilidad_operativa / total_ingresos"
+
+    pathways:
+      ruta_riesgo_liquidez:
+        description: "Ruta cuando hay señales de liquidez frágil."
+        entry_criteria:
+          from_rules: ["R_CF_001", "R_CF_002", "R_CF_004"]
+        steps:
+          - "Revisar estructura de costos y gastos."
+          - "Analizar CxC e inventarios."
+          - "Coordinar acciones con AAAV CxC y CxP."
+          - "Ajustar proyecciones financieras junto al AV Finanzas."
+
+  ##########################################################################
+  # AAV CONTADOR (GERENCIAL)
+  ##########################################################################
+  aav_contador:
+
+    concepts:
+      definicion_contabilidad:
+        title: "Definición de contabilidad"
+        text: >
+          La contabilidad registra y comunica información económica. Sirve
+          para la toma de decisiones internas y el control externo.
+
+      alcance_aav_contador:
+        title: "Alcance del AAV Contador"
+        text: >
+          Se centra en contabilidad gerencial: información útil y oportuna
+          para decisiones internas. No responde temas fiscales, financieros
+          externos ni modelos de costeo avanzados.
+
+    rules:
+      - id: R_AAVC_001
+        name: "Fuera de alcance: contabilidad fiscal"
+        scope: ["restriccion"]
+        triggers:
+          keywords: ["impuesto", "IVA", "renta", "tributación"]
+        recommendation:
+          short: "Redirigir temas fiscales al AV Contable-Financiero."
+          detailed: >
+            El AAV Contador no responde consultas de cálculo de impuestos,
+            declaraciones ni criterios tributarios. Estos se derivan al agente
+            correspondiente.
+        tags: ["fiscal", "restriccion"]
+
+      - id: R_AAVC_002
+        name: "Fuera de alcance: contabilidad financiera externa"
+        scope: ["restriccion"]
+        triggers:
+          keywords: ["NIIF", "NIC", "estados financieros oficiales"]
+        recommendation:
+          short: "Redirigir consultas de estados financieros oficiales."
+          detailed: >
+            El AAV Contador trabaja con información procesada para uso interno.
+            La emisión de estados financieros oficiales es responsabilidad del
+            contador externo.
+        tags: ["financiera", "restriccion"]
+
+      - id: R_AAVC_004
+        name: "Tarea principal: contabilidad gerencial"
+        scope: ["gerencial"]
+        triggers:
+          keywords: ["planeación", "control", "decisión", "información interna"]
+        recommendation:
+          short: "Aplicar contabilidad gerencial."
+          detailed: >
+            El agente debe apoyar al gerente en análisis de datos,
+            generación de alternativas y evaluación de impacto, usando
+            aproximaciones cuando no existan datos exactos.
+        tags: ["gerencial", "analisis"]
+
+    formulas:
+      activos_corrientes:
+        formula: "AC = caja + cxc + inventarios"
+
+      pasivos_corrientes:
+        formula: "PC = cxp + salarios_por_pagar + impuestos_por_pagar"
+
+      capital_trabajo:
+        formula: "CT = AC - PC"
+
+      razon_corriente:
+        formula: "RC = AC / PC"
+
+    pathways:
+      soporte_decisiones_gerente:
+        description: "Transformar datos contables en decisiones gerenciales."
+        entry_criteria:
+          from_rules: ["R_AAVC_004"]
+        steps:
+          - "Identificar el problema financiero/operativo."
+          - "Revisar datos entregados por AV Contable-Financiero."
+          - "Aplicar lógica gerencial (con o sin datos completos)."
+          - "Proponer alternativas y efectos esperados."
+          - "Enviar resumen claro al AV Gerente."

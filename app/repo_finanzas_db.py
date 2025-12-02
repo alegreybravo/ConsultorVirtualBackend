@@ -3,7 +3,7 @@ from datetime import datetime, date
 from decimal import Decimal
 from collections import defaultdict
 
-from database import SessionLocal
+from .database import SessionLocal
 from app.models import FacturaCXC, FacturaCXP
 
 def _month_bounds(year: int, month: int):
