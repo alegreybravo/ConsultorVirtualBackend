@@ -8,18 +8,20 @@ load_dotenv()
 
 def get_chat_model():
     """
-    Devuelve el modelo GPT-4o (completo) para tareas de análisis financiero y causalidad.
+    Devuelve el modelo GPT-5.1-mini para tareas de análisis financiero.
     Configurado con variables de entorno:
       - OPENAI_API_KEY (obligatorio)
-      - OPENAI_MODEL (por defecto 'gpt-4o')
-      - OPENAI_TEMPERATURE (por defecto 0)
+      - OPENAI_MODEL (opcional, por defecto 'gpt-5.1')
+      - OPENAI_TEMPERATURE (opcional, por defecto 0)
     """
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("Falta la variable OPENAI_API_KEY")
 
-    model = os.getenv("OPENAI_MODEL", "gpt-4o")  # ahora el grande por defecto
+    # Por defecto usamos GPT-5.1 (modelo robusto)
+    model = os.getenv("OPENAI_MODEL", "gpt-5.1-mini")
     temperature = float(os.getenv("OPENAI_TEMPERATURE", "0"))
+
 
     return ChatOpenAI(
         model=model,

@@ -18,8 +18,16 @@ dependencies = [
   "requests>=2.31.0",
   "langchain>=0.2.6",
   "langchain-community>=0.2.6",
-  "langgraph>=0.2.2"
+  "langgraph>=0.2.2",
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.30.0",
+  "python-dotenv>=1.0.0",
+  "pydantic-settings>=2.0.0",
+  "python-multipart>=0.0.9"
+  "langchain-openai>=0.1.0"
+
 ]
+
 
 [build-system]
 requires = ["setuptools>=69", "wheel"]
