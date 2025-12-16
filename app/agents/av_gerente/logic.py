@@ -15,6 +15,8 @@ from ...tools.prompting import build_system_prompt
 from ...tools.fuzzy import fuzzify_dso, fuzzify_dpo, fuzzify_ccc, liquidity_risk
 from ...tools.causality import causal_hypotheses
 from ...utils.knowledge_base import get_applicable_rules  # KB
+from ...tools.formatters import format_currency, format_days
+
 
 
 # =========================
@@ -241,6 +243,55 @@ class Agent(BaseAgent):
             if isinstance(bal, dict) and not ctx["balances"]:
                 ctx["balances"] = {str(k): self._coerce_float(v) for k, v in bal.items()}
         return ctx
+    
+    def _extract_operational_totals(
+        self,
+        trace: List[Dict[str, Any]],
+        ctx: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Saca totales operativos que nos interesan para el resumen:
+          - CxC: total_por_cobrar, open_invoices
+          - CxP: total_por_pagar, open_invoices
+          - NWC_proxy: desde balances contables
+        """
+        out = {
+            "ar_outstanding": None,       # CxC total
+            "ar_open_invoices": None,     # # facturas CxC
+            "ap_outstanding": None,       # CxP total
+            "ap_open_invoices": None,     # # facturas CxP
+            "nwc_proxy": None,            # capital de trabajo proxy
+        }
+
+        # NWC desde balances contables (aav_contable)
+        balances = ctx.get("balances") or {}
+        if isinstance(balances, dict):
+            out["nwc_proxy"] = self._coerce_float(balances.get("NWC_proxy"))
+
+        for res in trace or []:
+            agent = res.get("agent")
+            data = res.get("data") or {}
+            if agent == "aaav_cxc":
+                if out["ar_outstanding"] is None:
+                    out["ar_outstanding"] = self._coerce_float(data.get("total_por_cobrar"))
+                if out["ar_open_invoices"] is None:
+                    oi = data.get("open_invoices")
+                    try:
+                        out["ar_open_invoices"] = int(oi) if oi is not None else None
+                    except Exception:
+                        pass
+            elif agent == "aaav_cxp":
+                if out["ap_outstanding"] is None:
+                    out["ap_outstanding"] = self._coerce_float(data.get("total_por_pagar"))
+                if out["ap_open_invoices"] is None:
+                    oi = data.get("open_invoices")
+                    try:
+                        out["ap_open_invoices"] = int(oi) if oi is not None else None
+                    except Exception:
+                        pass
+
+        return out
+
 
     def _build_fuzzy_signals(self, metrics: Dict[str, Optional[float]]) -> Dict[str, Any]:
         dso, dpo, ccc, cash = (
@@ -525,6 +576,7 @@ class Agent(BaseAgent):
     def _fallback_report(
         self,
         ctx: Dict[str, Any],
+        op_totals: Dict[str, Any],
         fuzzy_signals: Dict[str, Any],
         causal_traditional: List[str],
         causal_llm: List[str],
@@ -534,16 +586,29 @@ class Agent(BaseAgent):
         dpo = k.get("DPO")
         ccc = k.get("CCC")
 
+        ar = op_totals.get("ar_outstanding")
+        ap = op_totals.get("ap_outstanding")
+        ar_open = op_totals.get("ar_open_invoices") or 0
+        ap_open = op_totals.get("ap_open_invoices") or 0
+        nwc = op_totals.get("nwc_proxy")
+
+        dso_txt = format_days(dso)
+        dpo_txt = format_days(dpo)
+        ccc_txt = format_days(ccc)
+        ar_txt = format_currency(ar)
+        ap_txt = format_currency(ap)
+        nwc_txt = format_currency(nwc)
+
         hallazgos, riesgos, reco = [], [], []
 
         if isinstance(dso, (int, float)) and dso > 45:
-            hallazgos.append(f"DSO por encima del umbral (>{45}d): {dso:.1f}d")
+            hallazgos.append(f"DSO por encima del umbral (>45 días): {dso_txt}.")
             reco.append("Campaña dunning top-10 clientes (30-60-90).")
         if isinstance(dpo, (int, float)) and dpo < 40:
-            hallazgos.append(f"DPO por debajo del umbral (<{40}d): {dpo:.1f}d")
+            hallazgos.append(f"DPO por debajo del umbral (<40 días): {dpo_txt}.")
             reco.append("Renegociar 2–3 proveedores para ampliar plazos.")
         if isinstance(ccc, (int, float)) and ccc > 20:
-            hallazgos.append(f"CCC elevado (>20d): {ccc:.1f}d")
+            hallazgos.append(f"CCC elevado (>20 días): {ccc_txt}.")
             reco.append("Calendario AR/AP semanal y control de gastos no esenciales (30d).")
         if not hallazgos:
             hallazgos.append("KPIs dentro de rangos razonables para el mes.")
@@ -552,16 +617,18 @@ class Agent(BaseAgent):
         if isinstance(ccc, (int, float)) and ccc > 0:
             riesgos.append("Presión de caja por ciclo de conversión positivo.")
         if isinstance(dso, (int, float)) and isinstance(dpo, (int, float)) and (dso - dpo) > 10:
-            riesgos.append("Desbalance entre cobros y pagos (DSO >> DPO).")
+            riesgos.append("Desbalance entre cobros y pagos (DSO mucho mayor que DPO).")
         if not riesgos:
             riesgos.append("Riesgo moderado; continuar monitoreo semanal de AR/AP.")
 
         resumen = (
-            f"KPIs: DSO={dso if dso is not None else 'N/D'}d, "
-            f"DPO={dpo if dpo is not None else 'N/D'}d, "
-            f"CCC={ccc if ccc is not None else 'N/D'}d. "
-            "Informe estructurado con acciones tácticas para liquidez."
+            f"KPIs: DSO={dso_txt}, DPO={dpo_txt}, CCC={ccc_txt}. "
+            f"Las cuentas por cobrar abiertas suman {ar_txt} en {ar_open} facturas, "
+            f"y las cuentas por pagar abiertas ascienden a {ap_txt} en {ap_open} facturas. "
         )
+        if nwc is not None:
+            resumen += f"El capital de trabajo operativo proxy (NWC) es de {nwc_txt}. "
+        resumen += "Informe estructurado con acciones tácticas para liquidez."
 
         return {
             "resumen_ejecutivo": resumen,
@@ -570,9 +637,12 @@ class Agent(BaseAgent):
             "recomendaciones": reco,
             "bsc": {
                 "finanzas": [
-                    f"DSO: {dso:.1f}d" if isinstance(dso, (int, float)) else "DSO: N/D",
-                    f"DPO: {dpo:.1f}d" if isinstance(dpo, (int, float)) else "DPO: N/D",
-                    f"CCC: {ccc:.1f}d" if isinstance(ccc, (int, float)) else "CCC: N/D",
+                    f"DSO: {dso_txt}",
+                    f"DPO: {dpo_txt}",
+                    f"CCC: {ccc_txt}",
+                    f"CxC abiertas: {ar_txt} en {ar_open} facturas",
+                    f"CxP abiertas: {ap_txt} en {ap_open} facturas",
+                    f"NWC proxy: {nwc_txt}" if nwc is not None else "NWC proxy: N/D",
                 ],
                 "clientes": ["Sin datos de NPS/Churn en este corte."],
                 "procesos_internos": ["Revisión de aging AR/AP semanal."],
@@ -586,10 +656,12 @@ class Agent(BaseAgent):
             "_insumos": {"fuzzy_signals": fuzzy_signals},
         }
 
+
     def _post_process_report(
         self,
         report: Dict[str, Any],
         ctx: Dict[str, Any],
+        op_totals: Dict[str, Any],
         deterministic_orders: List[Dict[str, Any]],
         causal_traditional: List[str],
         causal_llm: List[str],
@@ -597,20 +669,54 @@ class Agent(BaseAgent):
         if not isinstance(report, dict):
             return report
 
-        # Asegura BSC.finanzas con KPIs reales
+        # --- KPIs numéricos ---
         bsc = report.get("bsc") if isinstance(report.get("bsc"), dict) else {}
         k = ctx.get("kpis", {})
         dso = k.get("DSO")
         dpo = k.get("DPO")
         ccc = k.get("CCC")
+
+        ar = op_totals.get("ar_outstanding")
+        ap = op_totals.get("ap_outstanding")
+        ar_open = op_totals.get("ar_open_invoices") or 0
+        ap_open = op_totals.get("ap_open_invoices") or 0
+        nwc = op_totals.get("nwc_proxy")
+
+        dso_txt = format_days(dso)
+        dpo_txt = format_days(dpo)
+        ccc_txt = format_days(ccc)
+        ar_txt = format_currency(ar)
+        ap_txt = format_currency(ap)
+        nwc_txt = format_currency(nwc)
+
+        # FMT-02: BSC.finanzas SIEMPRE con DSO/DPO/CCC + CxC/CxP/NWC
         bsc["finanzas"] = [
-            f"DSO: {dso:.1f}d" if isinstance(dso, (int, float)) else "DSO: N/D",
-            f"DPO: {dpo:.1f}d" if isinstance(dpo, (int, float)) else "DPO: N/D",
-            f"CCC: {ccc:.1f}d" if isinstance(ccc, (int, float)) else "CCC: N/D",
+            f"DSO: {dso_txt}",
+            f"DPO: {dpo_txt}",
+            f"CCC: {ccc_txt}",
+            f"CxC abiertas: {ar_txt} en {ar_open} facturas",
+            f"CxP abiertas: {ap_txt} en {ap_open} facturas",
+            f"NWC proxy: {nwc_txt}" if nwc is not None else "NWC proxy: N/D",
         ]
         report["bsc"] = bsc
 
-        # Inserta/une causalidad
+        # Enriquecer resumen_ejecutivo con estos KPIs clave
+        resumen = report.get("resumen_ejecutivo")
+        extra_line = (
+            f" En este período, las cuentas por cobrar abiertas suman {ar_txt} en {ar_open} facturas, "
+            f"las cuentas por pagar abiertas ascienden a {ap_txt} en {ap_open} facturas, "
+        )
+        if nwc is not None:
+            extra_line += f"y el capital de trabajo operativo proxy (NWC) es de {nwc_txt}."
+        else:
+            extra_line += "y el capital de trabajo operativo proxy (NWC) se reporta como N/D."
+
+        if isinstance(resumen, str) and resumen.strip():
+            report["resumen_ejecutivo"] = resumen.strip() + " " + extra_line
+        else:
+            report["resumen_ejecutivo"] = extra_line.strip()
+
+        # Inserta/une causalidad (igual que antes)
         cz = report.get("causalidad")
         if not isinstance(cz, dict):
             cz = {}
@@ -648,6 +754,7 @@ class Agent(BaseAgent):
 
         return report
 
+
     # -------------------------
     # Handler principal
     # -------------------------
@@ -666,6 +773,8 @@ class Agent(BaseAgent):
         # 2) Contexto data-grounded + fuzzy (solo como señal cualitativa)
         ctx = self._extract_context(trace)
         fuzzy_signals = self._build_fuzzy_signals(metrics)
+        # Totales operativos para CxC/CxP y NWC (para resumen y BSC)
+        op_totals = self._extract_operational_totals(trace, ctx)
 
         # 🔹 Detectar si estamos en modo con datos (BD) o consultivo
         has_data = self._has_hard_data(ctx, metrics)
@@ -835,7 +944,7 @@ class Agent(BaseAgent):
 
         # Fallback si el LLM no devuelve JSON válido
         if not isinstance(report_json, dict):
-            fallback = self._fallback_report(ctx, fuzzy_signals, causal_traditional, [])
+            fallback = self._fallback_report(ctx, op_totals, fuzzy_signals, causal_traditional, [])
             fallback["ordenes_prioritarias"] = det_orders
             # También reflejamos qué reglas estaban activas en este caso
             fallback["applied_rules"] = kb_rules
@@ -855,6 +964,7 @@ class Agent(BaseAgent):
         final_report = self._post_process_report(
             report_json,
             ctx,
+            op_totals,
             det_orders,
             causal_traditional,
             report_json.get("causalidad", {}).get("hipotesis", []),

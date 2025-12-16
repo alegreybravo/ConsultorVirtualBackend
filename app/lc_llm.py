@@ -3,28 +3,27 @@ import os
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 
-# Cargar variables de entorno desde .env
 load_dotenv()
 
-def get_chat_model():
+
+def get_chat_model(model: str | None = None, temperature: float | None = None) -> ChatOpenAI:
     """
-    Devuelve el modelo GPT-5.1-mini para tareas de análisis financiero.
-    Configurado con variables de entorno:
-      - OPENAI_API_KEY (obligatorio)
-      - OPENAI_MODEL (opcional, por defecto 'gpt-5.1')
-      - OPENAI_TEMPERATURE (opcional, por defecto 0)
+    Devuelve un ChatOpenAI configurado.
+
+    - Si 'model' viene en el código -> lo usa.
+    - Si no, usa OPENAI_MODEL o 'gpt-4o' por defecto.
+    - Igual con temperature: parámetro > ENV > 0.0
     """
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("Falta la variable OPENAI_API_KEY")
 
-    # Por defecto usamos GPT-5.1 (modelo robusto)
-    model = os.getenv("OPENAI_MODEL", "gpt-5.1-mini")
-    temperature = float(os.getenv("OPENAI_TEMPERATURE", "0"))
+    model_name = model or os.getenv("OPENAI_MODEL", "gpt-4o")
+    temp = temperature if temperature is not None else float(os.getenv("OPENAI_TEMPERATURE", "0"))
 
-
+    # 👈 OJO: en algunas versiones es model_name, NO model
     return ChatOpenAI(
-        model=model,
-        temperature=temperature,
-        api_key=api_key
+        model_name=model_name,
+        temperature=temp,
+        api_key=api_key,
     )

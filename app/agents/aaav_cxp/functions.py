@@ -12,10 +12,65 @@ from dateutil import parser as dateparser
 from ...state import GlobalState
 from ...tools.calc_kpis import month_window  # fallback si sólo llega "YYYY-MM"
 from ...tools.schema_validate import validate_with  # opcional (no bloquea)
+from app.tools.llm_json import call_llm_json
 
 from app.database import SessionLocal
 from app.models import FacturaCXP, Entidad
 from app.repo_finanzas_db import FinanzasRepoDB
+
+
+
+# ===================== Catálogo de skills CxP =====================
+SKILLS_CXP = [
+    {
+        "id": "metrics",
+        "description": "Calcular métricas base de CxP (DPO, total_por_pagar, por_vencer, aging vencido).",
+        "params_schema": {}
+    },
+    {
+        "id": "aging",
+        "description": "Obtener snapshot de antigüedad de saldos vencidos en buckets 0-30, 31-60, 61-90 y 90+ días.",
+        "params_schema": {}
+    },
+    {
+        "id": "top_overdue",
+        "description": "Top N facturas vencidas por monto y días de atraso.",
+        "params_schema": {
+            "n": {
+                "type": "integer",
+                "description": "Cantidad de facturas a listar.",
+                "default": 10
+            }
+        }
+    },
+    {
+        "id": "due_soon",
+        "description": "Facturas que vencen en los próximos N días.",
+        "params_schema": {
+            "days": {
+                "type": "integer",
+                "description": "Cantidad máxima de días hasta el vencimiento.",
+                "default": 7
+            }
+        }
+    },
+    {
+        "id": "supplier_balance",
+        "description": "Saldo pendiente de un proveedor específico.",
+        "params_schema": {
+            "supplier": {
+                "type": "string",
+                "description": "Nombre legal o ID del proveedor."
+            }
+        }
+    },
+    {
+        "id": "list_open",
+        "description": "Listado de todas las facturas abiertas (con saldo > 0).",
+        "params_schema": {}
+    },
+]
+
 
 SCHEMA = "app/schemas/aaav_cxp_schema.json"
 
@@ -54,7 +109,7 @@ def _resolve_period(payload: Dict[str, Any], state: GlobalState) -> PeriodWindow
     return PeriodWindow(text=ym, start=s, end=e)
 
 
-# ===================== Mini-planner (analiza pregunta) =====================
+# ===================== Mini-planner clásico (regex) =====================
 @dataclass
 class Plan:
     actions: List[Dict[str, Any]]
@@ -70,6 +125,9 @@ def _to_int(s: str, default: int) -> int:
 
 
 def analyze_user_request(question: str) -> Plan:
+    """
+    Planner heurístico (sin LLM), por si queremos fallback.
+    """
     q = (question or "").lower()
     actions: List[Dict[str, Any]] = []
     reasons: List[str] = []
@@ -112,6 +170,81 @@ def analyze_user_request(question: str) -> Plan:
         actions.append({"name": "metrics", "params": {}})
         reasons.append("Sin señales claras → métricas base.")
     return Plan(actions=actions, reasons=reasons)
+
+
+# ===================== Planner con LLM =====================
+def plan_with_llm(question: str, win: PeriodWindow) -> Plan:
+    """
+    Usa el LLM para decidir qué skills ejecutar y con qué parámetros.
+    Devuelve el mismo formato Plan(actions, reasons) que analyze_user_request.
+    """
+    # Prompt de sistema
+    system = (
+        "Eres un agente de planificación de consultas de Cuentas por Pagar (CxP).\n"
+        "Tu tarea es decidir qué acciones (skills) se deben ejecutar en base a la pregunta del usuario.\n"
+        "Debes devolver EXCLUSIVAMENTE un JSON con este formato:\n\n"
+        "{\n"
+        '  "actions": [\n'
+        '    {"name": "metrics", "params": {}},\n'
+        '    {"name": "aging", "params": {}},\n'
+        '    {"name": "top_overdue", "params": {"n": 5}}\n'
+        "  ],\n"
+        '  "reasons": ["motivo 1", "motivo 2"]\n'
+        "}\n\n"
+        "Solo puedes usar estos skills:\n"
+    )
+
+    skills_txt = ""
+    for s in SKILLS_CXP:
+        skills_txt += f"- {s['id']}: {s['description']}\n"
+
+    system += skills_txt
+
+    # Mensaje de usuario
+    user = (
+        f"Pregunta del usuario: {question}\n"
+        f"Período de referencia: {win.text} "
+        f"({win.start.date()} a {win.end.date()}).\n"
+        "Devuelve solo el JSON pedido, sin comentarios adicionales."
+    )
+
+    # 👇 ahora sí: usamos el helper central
+    raw = call_llm_json(
+        system=system,
+        user=user,
+        model="gpt-4o-mini",
+        temperature=0.0,
+    )
+
+    actions = raw.get("actions") or []
+    reasons = raw.get("reasons") or []
+
+    # Validación mínima para evitar cosas raras
+    cleaned_actions: List[Dict[str, Any]] = []
+    valid_ids = {s["id"] for s in SKILLS_CXP}
+
+    for a in actions:
+        if not isinstance(a, dict):
+            continue
+        name = a.get("name")
+        if name not in valid_ids:
+            continue
+        params = a.get("params") or {}
+
+        # defaults simples
+        if name == "top_overdue":
+            params.setdefault("n", 10)
+        if name == "due_soon":
+            params.setdefault("days", 7)
+
+        cleaned_actions.append({"name": name, "params": params})
+
+    if not cleaned_actions:
+        cleaned_actions = [{"name": "metrics", "params": {}}]
+        reasons = reasons + ["Fallback a 'metrics' por falta de acciones válidas."]
+
+    return Plan(actions=cleaned_actions, reasons=reasons)
+
 
 
 # ===================== Helpers DB CxP =====================
@@ -296,7 +429,7 @@ def _count_open_db(ref_date: date) -> int:
         db.close()
 
 
-# ===================== Orquestador interno (antes estaba en handle) =====================
+# ===================== Orquestador interno =====================
 def run_agent(payload: Dict[str, Any], state: GlobalState) -> Dict[str, Any]:
     """
     Equivalente a lo que antes hacía Agent.handle, pero sin tocar 'self' ni poner 'agent'.
@@ -353,15 +486,21 @@ def run_agent(payload: Dict[str, Any], state: GlobalState) -> Dict[str, Any]:
     except Exception:
         pass
 
-    # 4) Plan de ejecución
+    # 4) Plan de ejecución (LLM + fallback regex)
     if forced_action:
         actions = [{"name": forced_action, "params": params_in}]
         reasons = ["Forced action"]
     else:
-        plan = analyze_user_request(question)
+        try:
+            plan = plan_with_llm(question, win)
+        except Exception as e:
+            # Si el planner LLM falla, usamos el planner clásico
+            plan = analyze_user_request(question)
+            plan.reasons.append(f"Fallback a analyze_user_request por error planner LLM: {e}")
         actions = plan.actions
         reasons = plan.reasons
 
+    # 5) Ejecutar acciones
     result_tables: List[Dict[str, Any]] = []
     for a in actions:
         name = a["name"]
@@ -407,7 +546,7 @@ def run_agent(payload: Dict[str, Any], state: GlobalState) -> Dict[str, Any]:
         else:
             result_tables.append({"action": name, "error": "Acción desconocida"})
 
-    # 5) Salida normalizada + mirror top-level
+    # 6) Salida normalizada + mirror top-level
     return {
         "summary": "CxP ejecutado: " + (forced_action or ", ".join(sorted({a["name"] for a in actions}))),
         "data": data_norm,
