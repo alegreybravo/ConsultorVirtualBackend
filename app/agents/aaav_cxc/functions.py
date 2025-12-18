@@ -1,11 +1,12 @@
 # app/agents/aaav_cxc/functions.py
 from __future__ import annotations
-from typing import Dict, Any, List, Tuple
+
+from typing import Dict, Any, List, Tuple, Optional
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
-
 import re
+
 import pandas as pd
 from dateutil import parser as dateparser
 
@@ -49,7 +50,7 @@ def resolve_period(payload: Dict[str, Any], state: GlobalState) -> PeriodWindow:
         s, e, _ = month_window(p)
         return PeriodWindow(text=p, start=s, end=e)
 
-    # Fallback: mes actual (TZ CR ya aplicada en calc_kpis si corresponde)
+    # Fallback: mes actual
     today = pd.Timestamp.today(tz="America/Costa_Rica")
     ym = today.strftime("%Y-%m")
     s, e, _ = month_window(ym)
@@ -71,6 +72,59 @@ def resolve_ref_date(win: PeriodWindow) -> date:
 
 
 # ---------------------------------------------------------------------
+# Helpers de serialización
+# ---------------------------------------------------------------------
+def _iso_date(d: Any) -> Optional[str]:
+    """
+    Normaliza fechas a 'YYYY-MM-DD' para que la API sea JSON-friendly.
+    Acepta date/datetime/pandas timestamp/string; devuelve str o None.
+    """
+    if d is None:
+        return None
+    try:
+        if hasattr(d, "date") and not isinstance(d, date):
+            d = d.date()
+        if hasattr(d, "isoformat"):
+            return d.isoformat()
+    except Exception:
+        pass
+    try:
+        s = str(d).strip()
+        if s:
+            return s[:10]
+    except Exception:
+        pass
+    return None
+
+
+def _norm_open_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Aplica normalizaciones comunes:
+      - due_date -> iso string
+      - issue_date -> iso string (si existe)
+      - days_overdue -> int o None
+    """
+    out = dict(row)
+
+    if "due_date" in out:
+        out["due_date"] = _iso_date(out.get("due_date"))
+
+    if "issue_date" in out:
+        out["issue_date"] = _iso_date(out.get("issue_date"))
+
+    d = out.get("days_overdue")
+    if d is None:
+        out["days_overdue"] = None
+    else:
+        try:
+            out["days_overdue"] = int(d)
+        except Exception:
+            out["days_overdue"] = None
+
+    return out
+
+
+# ---------------------------------------------------------------------
 # Helpers DB (CXC)
 # ---------------------------------------------------------------------
 def _saldo_cxc(f: FacturaCXC) -> Decimal:
@@ -78,56 +132,115 @@ def _saldo_cxc(f: FacturaCXC) -> Decimal:
     return Decimal((f.monto or 0) - (f.monto_pagado or 0))
 
 
-def _aging_and_totals_db(ref_date: date) -> Tuple[Dict[str, float], float, float, int]:
+def build_aging_cxc_db(ref_date: date) -> Dict[str, Any]:
     """
-    Devuelve:
-      - aging SOLO vencido con llaves normalizadas: 0_30, 31_60, 61_90, 90_plus
-      - total_por_cobrar (saldo abierto)
-      - por_vencer (no vencido, incluye 'sin fecha')
-      - open_count (número de facturas abiertas > 0)
+    Construye un aging NO ambiguo:
+      - aging_overdue: solo vencido (ref_date > fecha_limite) por buckets de días VENCIDOS
+      - aging_current: no vencido (ref_date <= fecha_limite) por buckets de días PARA VENCER
+      - sin_fecha_limite: saldo sin fecha de vencimiento
+      - totales y conteos
+
+    Importante:
+      - overdue_1_30 significa: vencido entre 1 y 30 días
+      - current_0_7 significa: vence en 0 a 7 días (incluye hoy)
     """
     db = SessionLocal()
-    overdue = {
-        "0_30": Decimal("0"),
-        "31_60": Decimal("0"),
-        "61_90": Decimal("0"),
-        "90_plus": Decimal("0"),
+
+    aging_overdue = {
+        "overdue_1_30": Decimal("0"),
+        "overdue_31_60": Decimal("0"),
+        "overdue_61_90": Decimal("0"),
+        "overdue_90_plus": Decimal("0"),
     }
-    current = Decimal("0")     # no vencido (<= 0 días)
-    no_due = Decimal("0")      # sin fecha_limite
-    open_count = 0
+
+    aging_current = {
+        "current_0_7": Decimal("0"),
+        "current_8_15": Decimal("0"),
+        "current_16_30": Decimal("0"),
+        "current_31_plus": Decimal("0"),
+    }
+
+    sin_fecha_limite = Decimal("0")
+    total_outstanding = Decimal("0")
+    total_overdue = Decimal("0")
+    total_current = Decimal("0")
+    open_invoices = 0
+
     try:
         for f in db.query(FacturaCXC):
             saldo = _saldo_cxc(f)
             if saldo <= 0:
                 continue
-            open_count += 1
-            # FECHA DE VENCIMIENTO EN TU TABLA: fecha_limite
-            if not f.fecha_limite:
-                no_due += saldo
-                continue
-            days = (ref_date - f.fecha_limite.date()).days
-            if days <= 0:
-                current += saldo
-            elif days <= 30:
-                overdue["0_30"] += saldo
-            elif days <= 60:
-                overdue["31_60"] += saldo
-            elif days <= 90:
-                overdue["61_90"] += saldo
-            else:
-                overdue["90_plus"] += saldo
 
-        total_por_cobrar = float(current + no_due + sum(overdue.values()))
-        por_vencer = float(current + no_due)
-        return (
-            {k: float(v) for k, v in overdue.items()},
-            total_por_cobrar,
-            por_vencer,
-            open_count,
-        )
+            open_invoices += 1
+            total_outstanding += saldo
+
+            if not f.fecha_limite:
+                sin_fecha_limite += saldo
+                continue
+
+            due = f.fecha_limite.date()
+            if ref_date > due:
+                # vencido
+                days_overdue = (ref_date - due).days
+                total_overdue += saldo
+
+                if 1 <= days_overdue <= 30:
+                    aging_overdue["overdue_1_30"] += saldo
+                elif 31 <= days_overdue <= 60:
+                    aging_overdue["overdue_31_60"] += saldo
+                elif 61 <= days_overdue <= 90:
+                    aging_overdue["overdue_61_90"] += saldo
+                else:
+                    aging_overdue["overdue_90_plus"] += saldo
+            else:
+                # por vencer / vigente
+                days_to_due = (due - ref_date).days
+                total_current += saldo
+
+                if 0 <= days_to_due <= 7:
+                    aging_current["current_0_7"] += saldo
+                elif 8 <= days_to_due <= 15:
+                    aging_current["current_8_15"] += saldo
+                elif 16 <= days_to_due <= 30:
+                    aging_current["current_16_30"] += saldo
+                else:
+                    aging_current["current_31_plus"] += saldo
+
+        return {
+            "aging_overdue": {k: float(v) for k, v in aging_overdue.items()},
+            "aging_current": {k: float(v) for k, v in aging_current.items()},
+            "sin_fecha_limite": float(sin_fecha_limite),
+            "total_outstanding": float(total_outstanding),
+            "total_overdue": float(total_overdue),
+            "total_current": float(total_current),
+            "open_invoices": int(open_invoices),
+        }
     finally:
         db.close()
+
+
+def _aging_and_totals_db(ref_date: date) -> Tuple[Dict[str, float], float, float, float, int]:
+    """
+    Legacy helper (lo dejo por compatibilidad interna si algo más lo usa):
+      - aging SOLO vencido: 0_30, 31_60, 61_90, 90_plus  (VENCIDOS)
+      - total_por_cobrar (saldo abierto)
+      - current_not_due (NO vencido)
+      - no_due_date (saldo sin fecha_limite)
+      - open_count
+    """
+    pack = build_aging_cxc_db(ref_date)
+    overdue_legacy = {
+        "0_30": pack["aging_overdue"]["overdue_1_30"],
+        "31_60": pack["aging_overdue"]["overdue_31_60"],
+        "61_90": pack["aging_overdue"]["overdue_61_90"],
+        "90_plus": pack["aging_overdue"]["overdue_90_plus"],
+    }
+    total_por_cobrar = pack["total_outstanding"]
+    current_not_due = pack["total_current"]
+    no_due_date = pack["sin_fecha_limite"]
+    open_count = pack["open_invoices"]
+    return overdue_legacy, float(total_por_cobrar), float(current_not_due), float(no_due_date), int(open_count)
 
 
 def _list_top_overdue_db(limit_n: int, ref_date: date) -> List[Dict[str, Any]]:
@@ -138,11 +251,14 @@ def _list_top_overdue_db(limit_n: int, ref_date: date) -> List[Dict[str, Any]]:
             saldo = float(_saldo_cxc(f))
             if saldo <= 0:
                 continue
-            days_over = 0
-            if f.fecha_limite:
-                days_over = max((ref_date - f.fecha_limite.date()).days, 0)
+
+            due = f.fecha_limite.date() if f.fecha_limite else None
+            if not due:
+                continue
+            days_over = (ref_date - due).days
             if days_over <= 0:
                 continue
+
             cliente = (
                 f.cliente.nombre_legal
                 if getattr(f, "cliente", None)
@@ -150,15 +266,18 @@ def _list_top_overdue_db(limit_n: int, ref_date: date) -> List[Dict[str, Any]]:
             )
 
             rows.append(
-                {
-                    "invoice_id": f.numero_factura,
-                    "customer": cliente,
-                    "due_date": f.fecha_limite.date() if f.fecha_limite else None,
-                    "days_overdue": days_over,
-                    "outstanding": saldo,
-                }
+                _norm_open_row(
+                    {
+                        "invoice_id": f.numero_factura,
+                        "customer": cliente,
+                        "due_date": due,
+                        "days_overdue": days_over,
+                        "outstanding": saldo,
+                    }
+                )
             )
-        rows.sort(key=lambda r: (r["days_overdue"], r["outstanding"]), reverse=True)
+
+        rows.sort(key=lambda r: (r.get("days_overdue") or 0, r.get("outstanding") or 0.0), reverse=True)
         return rows[: int(limit_n)]
     finally:
         db.close()
@@ -190,19 +309,24 @@ def _customer_balance_db(name_or_id: str, ref_date: date):
             saldo = float(_saldo_cxc(f))
             if saldo <= 0:
                 continue
-            days_over = 0
-            if f.fecha_limite:
-                days_over = max((ref_date - f.fecha_limite.date()).days, 0)
+
+            due = f.fecha_limite.date() if f.fecha_limite else None
+            issue = f.fecha_emision.date() if f.fecha_emision else None
+            days_over = None if not due else max((ref_date - due).days, 0)
+
             rows.append(
-                {
-                    "invoice_id": f.numero_factura,
-                    "issue_date": f.fecha_emision.date() if f.fecha_emision else None,
-                    "due_date": f.fecha_limite.date() if f.fecha_limite else None,
-                    "days_overdue": days_over,
-                    "outstanding": saldo,
-                }
+                _norm_open_row(
+                    {
+                        "invoice_id": f.numero_factura,
+                        "issue_date": issue,
+                        "due_date": due,
+                        "days_overdue": days_over,
+                        "outstanding": saldo,
+                    }
+                )
             )
             total += saldo
+
         return total, rows
     finally:
         db.close()
@@ -216,18 +340,20 @@ def _list_open_db(ref_date: date) -> List[Dict[str, Any]]:
             saldo = float(_saldo_cxc(f))
             if saldo <= 0:
                 continue
+
             due = f.fecha_limite.date() if f.fecha_limite else None
-            days_over = max((ref_date - due).days, 0) if due else 0
-            status = "paid/zero"
-            if (
-                saldo > 0
-                and days_over == 0
-                and due
-                and (due - ref_date).days >= 0
-            ):
-                status = "open_on_time"
-            elif saldo > 0 and days_over > 0:
-                status = "overdue"
+            if not due:
+                status = "no_due_date"
+                days_over = None
+            else:
+                days_over_raw = (ref_date - due).days
+                if days_over_raw > 0:
+                    status = "overdue"
+                    days_over = days_over_raw
+                else:
+                    status = "open_on_time"
+                    days_over = 0
+
             cliente = (
                 f.cliente.nombre_legal
                 if getattr(f, "cliente", None)
@@ -235,17 +361,25 @@ def _list_open_db(ref_date: date) -> List[Dict[str, Any]]:
             )
 
             rows.append(
-                {
-                    "invoice_id": f.numero_factura,
-                    "customer": cliente,
-                    "due_date": due,
-                    "status": status,
-                    "days_overdue": days_over,
-                    "outstanding": saldo,
-                }
+                _norm_open_row(
+                    {
+                        "invoice_id": f.numero_factura,
+                        "customer": cliente,
+                        "due_date": due,
+                        "status": status,
+                        "days_overdue": days_over,
+                        "outstanding": saldo,
+                    }
+                )
             )
+
+        order_rank = {"overdue": 0, "open_on_time": 1, "no_due_date": 2}
         rows.sort(
-            key=lambda r: (r["status"], -r["days_overdue"], -r["outstanding"])
+            key=lambda r: (
+                order_rank.get(r.get("status") or "", 9),
+                -(r.get("days_overdue") or 0),
+                -(r.get("outstanding") or 0.0),
+            )
         )
         return rows
     finally:
@@ -256,38 +390,62 @@ def _list_open_db(ref_date: date) -> List[Dict[str, Any]]:
 # Construcción de contexto base (KPI + aging + totales)
 # ---------------------------------------------------------------------
 def build_context(win: PeriodWindow, ref_date: date) -> Dict[str, Any]:
-    # 2) KPI base DSO
     repo = FinanzasRepoDB()
     try:
-        kpi_dso = repo.dso(win.start.year, win.start.month)
-    except Exception:
+        dso_pack = repo.dso(win.start.year, win.start.month, window_days=90)
+        kpi_dso = dso_pack.get("value")
+    except Exception as e:
+        dso_pack = {"value": None, "method": None, "reason": "Error calculando DSO."}
         kpi_dso = None
+        
 
-    # 3) Aging SOLO vencido + totales (con open_count)
     try:
-        aging_overdue, total_por_cobrar, por_vencer, open_count = _aging_and_totals_db(
-            ref_date
-        )
+        pack = build_aging_cxc_db(ref_date)
     except Exception as e:
         return {"error": f"Error leyendo CxC DB: {e}"}
 
-    # 4) Paquete normalizado
+    # Legacy overdue (solo vencido) para compatibilidad con tu Gerente actual
+    aging_legacy = {
+        "0_30": float(pack["aging_overdue"].get("overdue_1_30", 0.0)),
+        "31_60": float(pack["aging_overdue"].get("overdue_31_60", 0.0)),
+        "61_90": float(pack["aging_overdue"].get("overdue_61_90", 0.0)),
+        "90_plus": float(pack["aging_overdue"].get("overdue_90_plus", 0.0)),
+    }
+
     data_norm = {
         "period": win.text,
         "kpi": {"DSO": kpi_dso},
-        "aging": {
-            "0_30": float(aging_overdue.get("0_30", 0.0)),
-            "31_60": float(aging_overdue.get("31_60", 0.0)),
-            "61_90": float(aging_overdue.get("61_90", 0.0)),
-            "90_plus": float(aging_overdue.get("90_plus", 0.0)),
+        "calc_basis": {
+            "DSO": dso_pack
         },
-        "total_por_cobrar": float(total_por_cobrar),
-        "por_vencer": float(por_vencer),
-        "current": float(por_vencer),  # alias
-        "open_invoices": int(open_count),
+        "kpi": {"DSO": kpi_dso},
+
+        # ✅ NUEVO: explícito y no ambiguo
+        "aging_overdue": pack["aging_overdue"],
+        "aging_current": pack["aging_current"],
+
+        "current": float(pack["total_current"]),
+        "por_vencer": float(pack["total_current"]),
+
+        # ✅ LEGACY: mantenido, pero SOLO vencido
+        "aging": aging_legacy,
+
+        "total_por_cobrar": float(pack["total_outstanding"]),
+        "total_overdue": float(pack["total_overdue"]),
+        "total_current": float(pack["total_current"]),
+        "sin_fecha_limite": float(pack["sin_fecha_limite"]),
+        "open_invoices": int(pack["open_invoices"]),
+
+        # ✅ anti-confusión
+        "aging_explain": {
+            "ref_date": ref_date.isoformat(),
+            "aging_overdue": "Montos VENCIDOS (ref_date > fecha_limite) por rangos de días vencidos.",
+            "aging_current": "Montos NO vencidos (ref_date <= fecha_limite) por rangos de días para vencer.",
+            "aging_legacy": "Compatibilidad: SOLO vencido mapeado a 0_30/31_60/61_90/90_plus.",
+        },
     }
 
-    # 5) Validación (no bloqueante)
+    # Validación (no bloqueante)
     try:
         validate_with(SCHEMA, data_norm)
     except Exception:
@@ -297,11 +455,10 @@ def build_context(win: PeriodWindow, ref_date: date) -> Dict[str, Any]:
         "period_window": win,
         "ref_date": ref_date,
         "kpi_dso": kpi_dso,
-        "aging_overdue": aging_overdue,
-        "total_por_cobrar": total_por_cobrar,
-        "por_vencer": por_vencer,
-        "open_count": open_count,
         "data_norm": data_norm,
+
+        # también exponemos el pack por si alguna acción lo quiere directo
+        "aging_pack": pack,
     }
 
 
@@ -309,8 +466,9 @@ def build_context(win: PeriodWindow, ref_date: date) -> Dict[str, Any]:
 # Acciones
 # ---------------------------------------------------------------------
 def action_metrics(ctx: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+    open_count = int(ctx.get("aging_pack", {}).get("open_invoices") or 0)
     return {
-        "summary": f"CxC calculado (DB) — {ctx['open_count']} facturas abiertas",
+        "summary": f"CxC calculado (DB) — {open_count} facturas abiertas",
         "data": ctx["data_norm"],
         "dso": ctx["kpi_dso"],
     }
@@ -319,7 +477,7 @@ def action_metrics(ctx: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any
 def action_top_overdue(ctx: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
     ref_date: date = ctx["ref_date"]
     n = params.get("n", 10)
-    table = _list_top_overdue_db(n, ref_date)
+    table = _list_top_overdue_db(int(n), ref_date)
     return {
         "summary": "Top facturas por cobrar vencidas (más urgentes)",
         "data": ctx["data_norm"],
@@ -361,7 +519,6 @@ def action_list_open(ctx: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, A
 def action_list_overdue(ctx: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
     ref_date: date = ctx["ref_date"]
 
-    # Reutilizamos list_open y filtramos por vencidas
     table_all = _list_open_db(ref_date)
     overdue = [r for r in table_all if r.get("status") == "overdue"]
 
@@ -369,46 +526,25 @@ def action_list_overdue(ctx: Dict[str, Any], params: Dict[str, Any]) -> Dict[str
     p_max = params.get("max_days")
     if p_max is not None:
         p_max = int(p_max)
-        overdue = [
-            r
-            for r in overdue
-            if p_min <= r.get("days_overdue", 0) <= p_max
-        ]
+        overdue = [r for r in overdue if p_min <= int(r.get("days_overdue") or 0) <= p_max]
     else:
-        overdue = [r for r in overdue if r.get("days_overdue", 0) >= p_min]
+        overdue = [r for r in overdue if int(r.get("days_overdue") or 0) >= p_min]
 
     overdue.sort(
-        key=lambda r: (r.get("days_overdue", 0), r.get("outstanding", 0.0)),
+        key=lambda r: (int(r.get("days_overdue") or 0), float(r.get("outstanding") or 0.0)),
         reverse=True,
     )
 
-    # Serializar fecha
-    for r in overdue:
-        d = r.get("due_date")
-        if hasattr(d, "isoformat"):
-            r["due_date"] = d.isoformat()
-
-    # Agrupado por cliente
     by_customer_map: Dict[str, Dict[str, Any]] = {}
     for r in overdue:
         cust = r.get("customer") or "N/D"
-        if cust not in by_customer_map:
-            by_customer_map[cust] = {
-                "customer": cust,
-                "invoices": 0,
-                "total_outstanding": 0.0,
-            }
+        by_customer_map.setdefault(cust, {"customer": cust, "invoices": 0, "total_outstanding": 0.0})
         by_customer_map[cust]["invoices"] += 1
-        by_customer_map[cust]["total_outstanding"] += float(
-            r.get("outstanding", 0.0)
-        )
-    by_customer = sorted(
-        by_customer_map.values(),
-        key=lambda x: x["total_outstanding"],
-        reverse=True,
-    )
+        by_customer_map[cust]["total_outstanding"] += float(r.get("outstanding") or 0.0)
 
-    total_overdue = float(sum(r.get("outstanding", 0.0) for r in overdue))
+    by_customer = sorted(by_customer_map.values(), key=lambda x: x["total_outstanding"], reverse=True)
+    total_overdue = float(sum(float(r.get("outstanding") or 0.0) for r in overdue))
+
     return {
         "summary": "Facturas CxC vencidas (detalle)",
         "data": ctx["data_norm"],
@@ -449,7 +585,6 @@ def run_action(
     ctx = build_context(win, ref_date)
 
     if isinstance(ctx, dict) and ctx.get("error"):
-        # Devolvemos el error tal cual; el Agent añadirá el nombre del agente
         return {"error": ctx["error"]}
 
     handler = ACTIONS.get(action, action_metrics)

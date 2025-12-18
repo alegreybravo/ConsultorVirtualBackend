@@ -1,46 +1,88 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "AAAV CxC Output",
+  "title": "AAAV CxC Output (data_norm)",
   "type": "object",
+  "additionalProperties": true,
   "properties": {
-    "period": {
-      "type": "string"
-    },
-    "aging": {
-      "type": "object",
-      "properties": {
-        "0_30": {
-          "type": "number"
-        },
-        "31_60": {
-          "type": "number"
-        },
-        "61_90": {
-          "type": "number"
-        },
-        "90_plus": {
-          "type": "number"
-        }
-      }
-    },
+    "period": { "type": "string", "minLength": 1 },
+
     "kpi": {
       "type": "object",
+      "additionalProperties": true,
       "properties": {
-        "DSO": {
-          "type": "number"
-        }
+        "DSO": { "type": ["number", "null"] }
+      },
+      "required": ["DSO"]
+    },
+
+    "aging_overdue": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "overdue_1_30": { "type": "number" },
+        "overdue_31_60": { "type": "number" },
+        "overdue_61_90": { "type": "number" },
+        "overdue_90_plus": { "type": "number" }
+      },
+      "required": ["overdue_1_30", "overdue_31_60", "overdue_61_90", "overdue_90_plus"]
+    },
+
+    "aging_current": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "current_0_7": { "type": "number" },
+        "current_8_15": { "type": "number" },
+        "current_16_30": { "type": "number" },
+        "current_31_plus": { "type": "number" }
+      },
+      "required": ["current_0_7", "current_8_15", "current_16_30", "current_31_plus"]
+    },
+
+    "aging": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "0_30": { "type": "number" },
+        "31_60": { "type": "number" },
+        "61_90": { "type": "number" },
+        "90_plus": { "type": "number" }
+      },
+      "required": ["0_30", "31_60", "61_90", "90_plus"]
+    },
+
+    "total_por_cobrar": { "type": "number" },
+    "total_overdue": { "type": "number" },
+    "total_current": { "type": "number" },
+    "sin_fecha_limite": { "type": "number" },
+    "open_invoices": { "type": "integer", "minimum": 0 },
+
+    "aging_explain": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "ref_date": { "type": ["string", "null"] },
+        "aging_overdue": { "type": ["string", "null"] },
+        "aging_current": { "type": ["string", "null"] },
+        "aging_legacy": { "type": ["string", "null"] }
       }
     },
+
     "incidents": {
       "type": "array",
-      "items": {
-        "type": "string"
-      }
+      "items": { "type": "string" }
     }
   },
   "required": [
     "period",
+    "kpi",
+    "aging_overdue",
+    "aging_current",
     "aging",
-    "kpi"
+    "total_por_cobrar",
+    "total_overdue",
+    "total_current",
+    "sin_fecha_limite",
+    "open_invoices"
   ]
 }

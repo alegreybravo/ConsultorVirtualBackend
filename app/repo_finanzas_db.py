@@ -1,13 +1,12 @@
 # app/repo_finanzas_db.py
-from datetime import datetime, date
+from datetime import datetime, timedelta
 from decimal import Decimal
-from collections import defaultdict
 
 from .database import SessionLocal
 from app.models import FacturaCXC, FacturaCXP
 
+
 def _month_bounds(year: int, month: int):
-    """[inicio, fin) en datetime para comparar contra columnas timestamp sin perder registros por hora."""
     start = datetime(year, month, 1, 0, 0, 0)
     if month == 12:
         end = datetime(year + 1, 1, 1, 0, 0, 0)
@@ -15,119 +14,227 @@ def _month_bounds(year: int, month: int):
         end = datetime(year, month + 1, 1, 0, 0, 0)
     return start, end
 
+
+def _window_bounds(end: datetime, window_days: int) -> tuple[datetime, datetime]:
+    window_days = int(window_days or 0)
+    if window_days <= 0:
+        window_days = 90
+    return end - timedelta(days=window_days), end
+
+
+def _saldo(monto, pagado) -> Decimal:
+    m = Decimal(monto or 0)
+    p = Decimal(pagado or 0)
+    s = m - p
+    return s if s > 0 else Decimal("0")
+
+
 class FinanzasRepoDB:
-    """Consultas contra factura_cxc / factura_cxp para CxC, CxP, DSO/DPO y aging."""
+    # ---------- Helpers internos ----------
+    def _ar_end(self, db, end: datetime) -> Decimal:
+        ar = Decimal("0")
+        q = db.query(FacturaCXC).filter(FacturaCXC.fecha_emision < end)
+        for f in q:
+            ar += _saldo(f.monto, f.monto_pagado)
+        return ar
 
-    # ---- CxC ----
-    def cxc_balance_by_month(self, year: int, month: int) -> Decimal:
-        start, end = _month_bounds(year, month)
+    def _ap_end(self, db, end: datetime) -> Decimal:
+        ap = Decimal("0")
+        q = db.query(FacturaCXP).filter(FacturaCXP.fecha_emision < end)
+        for f in q:
+            ap += _saldo(f.monto, f.monto_pagado)
+        return ap
+
+    def _sales_between(self, db, start: datetime, end: datetime) -> Decimal:
+        s = Decimal("0")
+        q = db.query(FacturaCXC).filter(
+            FacturaCXC.fecha_emision >= start,
+            FacturaCXC.fecha_emision < end
+        )
+        for f in q:
+            s += Decimal(f.monto or 0)
+        return s
+
+    def _purchases_between(self, db, start: datetime, end: datetime) -> Decimal:
+        p = Decimal("0")
+        q = db.query(FacturaCXP).filter(
+            FacturaCXP.fecha_emision >= start,
+            FacturaCXP.fecha_emision < end
+        )
+        for f in q:
+            p += Decimal(f.monto or 0)
+        return p
+
+    # ---------- Helpers de robustez ----------
+    def _required_denom(self, end_balance: Decimal, min_abs_denom: Decimal, min_ratio: Decimal) -> Decimal:
+        """
+        Umbral mínimo requerido para que el denominador (ventas/compras) sea "representativo".
+        required = max(min_abs_denom, end_balance * min_ratio)
+        """
+        try:
+            min_abs = Decimal(min_abs_denom)
+        except Exception:
+            min_abs = Decimal("1")
+        try:
+            ratio = Decimal(min_ratio)
+        except Exception:
+            ratio = Decimal("0")
+
+        if ratio < 0:
+            ratio = Decimal("0")
+
+        rel = (end_balance * ratio) if end_balance and ratio else Decimal("0")
+        return max(min_abs, rel)
+
+    # ---------- DSO ----------
+    def dso(
+        self,
+        year: int,
+        month: int,
+        window_days: int = 90,
+        min_denominator: Decimal = Decimal("1"),          # compat (si alguien lo usa)
+        min_abs_denom: Decimal = Decimal("10000"),        # ✅ nuevo: umbral absoluto
+        min_ratio: Decimal = Decimal("0.10"),             # ✅ nuevo: umbral relativo vs AR_end
+    ) -> dict:
+        """
+        1) Intenta DSO mensual si ventas del mes son suficientes (no solo >0).
+        2) Si ventas del mes son 0 o "muy pequeñas", fallback a trailing window_days (default 90d).
+
+        Retorna dict:
+          { value, method, reason, window:{start,end,days}, denom, ar_end, required_denom }
+        """
+        m_start, m_end = _month_bounds(year, month)
+        t_start, t_end = _window_bounds(m_end, window_days)
+
         db = SessionLocal()
         try:
-            q = (
-                db.query(FacturaCXC)
-                .filter(FacturaCXC.fecha_emision >= start,
-                        FacturaCXC.fecha_emision < end)
-            )
-            total = Decimal("0")
-            for f in q:
-                monto = Decimal(f.monto or 0)
-                pagado = Decimal(f.monto_pagado or 0)
-                saldo = monto - pagado
-                total += saldo
-            return total
+            ar_end = self._ar_end(db, m_end)
+
+            # Umbral requerido para considerar "mes" válido
+            required = self._required_denom(ar_end, min_abs_denom, min_ratio)
+            # Mantener compat: si min_denominator es mayor, respétalo
+            try:
+                required = max(required, Decimal(min_denominator))
+            except Exception:
+                pass
+
+            sales_month = self._sales_between(db, m_start, m_end)
+            if sales_month >= required:
+                days = (m_end - m_start).days
+                value = float((ar_end / sales_month) * Decimal(days))
+                return {
+                    "value": value,
+                    "method": "month",
+                    "reason": None,
+                    "window": {"start": m_start.isoformat(), "end": m_end.isoformat(), "days": int(days)},
+                    "denom": float(sales_month),
+                    "ar_end": float(ar_end),
+                    "required_denom": float(required),
+                }
+
+            # fallback trailing
+            sales_trailing = self._sales_between(db, t_start, t_end)
+            if sales_trailing < required:
+                return {
+                    "value": None,
+                    "method": "trailing_90d",
+                    "reason": (
+                        "Ventas insuficientes para estimar DSO con confianza "
+                        f"(mes={float(sales_month):.2f}, trailing={float(sales_trailing):.2f}, "
+                        f"required={float(required):.2f})."
+                    ),
+                    "window": {"start": t_start.isoformat(), "end": t_end.isoformat(), "days": int(window_days)},
+                    "denom": float(sales_trailing),
+                    "ar_end": float(ar_end),
+                    "required_denom": float(required),
+                }
+
+            value = float((ar_end / sales_trailing) * Decimal(int(window_days)))
+            return {
+                "value": value,
+                "method": "trailing_90d",
+                "reason": (
+                    "Ventas del mes insuficientes; se usó ventana trailing para estimar DSO "
+                    f"(mes={float(sales_month):.2f} < required={float(required):.2f})."
+                ),
+                "window": {"start": t_start.isoformat(), "end": t_end.isoformat(), "days": int(window_days)},
+                "denom": float(sales_trailing),
+                "ar_end": float(ar_end),
+                "required_denom": float(required),
+            }
         finally:
             db.close()
 
-    def cxc_aging(self, today: date | None = None) -> dict[str, float]:
-        """Aging por buckets usando fecha_limite; suma saldos pendientes."""
-        today = today or date.today()
-        db = SessionLocal()
-        buckets = defaultdict(Decimal)
-        try:
-            for f in db.query(FacturaCXC):
-                monto = Decimal(f.monto or 0)
-                pagado = Decimal(f.monto_pagado or 0)
-                saldo = monto - pagado
-                if saldo <= 0:
-                    continue
-                if not f.fecha_limite:
-                    buckets["Sin vencimiento"] += saldo
-                    continue
-                # fecha_limite es DateTime → convierto a date
-                days = (today - f.fecha_limite.date()).days
-                if days <= 0:
-                    buckets["No vencido"] += saldo
-                elif days <= 30:
-                    buckets["1-30"] += saldo
-                elif days <= 60:
-                    buckets["31-60"] += saldo
-                elif days <= 90:
-                    buckets["61-90"] += saldo
-                else:
-                    buckets["+90"] += saldo
-            return {k: float(v) for k, v in buckets.items()}  # JSON-friendly
-        finally:
-            db.close()
+    # ---------- DPO ----------
+    def dpo(
+        self,
+        year: int,
+        month: int,
+        window_days: int = 90,
+        min_denominator: Decimal = Decimal("1"),          # compat
+        min_abs_denom: Decimal = Decimal("10000"),        # ✅ nuevo: umbral absoluto
+        min_ratio: Decimal = Decimal("0.10"),             # ✅ nuevo: umbral relativo vs AP_end
+    ) -> dict:
+        """
+        Igual que DSO pero para compras.
+        Retorna dict:
+          { value, method, reason, window:{start,end,days}, denom, ap_end, required_denom }
+        """
+        m_start, m_end = _month_bounds(year, month)
+        t_start, t_end = _window_bounds(m_end, window_days)
 
-    def dso(self, year: int, month: int, credit_sales: Decimal | None = None) -> float:
-        """DSO ≈ (CxC promedio / ventas a crédito) * días del período.
-        Si no pasas 'credit_sales', usamos sum(monto) del período como aproximación."""
-        start, end = _month_bounds(year, month)
         db = SessionLocal()
         try:
-            ar_end = Decimal("0")
-            sales = Decimal("0")
-            q = db.query(FacturaCXC).filter(FacturaCXC.fecha_emision >= start,
-                                            FacturaCXC.fecha_emision < end)
-            for f in q:
-                monto = Decimal(f.monto or 0)
-                pagado = Decimal(f.monto_pagado or 0)
-                sales += monto
-                ar_end += (monto - pagado)
-            ar_avg = ar_end  # aproximación (si quieres, promedia con mes anterior)
-            denom = Decimal(credit_sales) if credit_sales is not None else (sales or Decimal("1"))
-            days = (end - start).days
-            return float((ar_avg / denom) * days)
-        finally:
-            db.close()
+            ap_end = self._ap_end(db, m_end)
 
-    # ---- CxP ----
-    def cxp_balance_by_month(self, year: int, month: int) -> Decimal:
-        start, end = _month_bounds(year, month)
-        db = SessionLocal()
-        try:
-            q = (
-                db.query(FacturaCXP)
-                .filter(FacturaCXP.fecha_emision >= start,
-                        FacturaCXP.fecha_emision < end)
-            )
-            total = Decimal("0")
-            for f in q:
-                monto = Decimal(f.monto or 0)
-                pagado = Decimal(f.monto_pagado or 0)
-                saldo = monto - pagado
-                total += saldo
-            return total
-        finally:
-            db.close()
+            required = self._required_denom(ap_end, min_abs_denom, min_ratio)
+            try:
+                required = max(required, Decimal(min_denominator))
+            except Exception:
+                pass
 
-    def dpo(self, year: int, month: int, credit_purchases: Decimal | None = None) -> float:
-        """DPO ≈ (CxP promedio / compras a crédito) * días del período."""
-        start, end = _month_bounds(year, month)
-        db = SessionLocal()
-        try:
-            ap_end = Decimal("0")
-            purchases = Decimal("0")
-            q = db.query(FacturaCXP).filter(FacturaCXP.fecha_emision >= start,
-                                            FacturaCXP.fecha_emision < end)
-            for f in q:
-                monto = Decimal(f.monto or 0)
-                pagado = Decimal(f.monto_pagado or 0)
-                purchases += monto
-                ap_end += (monto - pagado)
-            ap_avg = ap_end
-            denom = Decimal(credit_purchases) if credit_purchases is not None else (purchases or Decimal("1"))
-            days = (end - start).days
-            return float((ap_avg / denom) * days)
+            purchases_month = self._purchases_between(db, m_start, m_end)
+            if purchases_month >= required:
+                days = (m_end - m_start).days
+                value = float((ap_end / purchases_month) * Decimal(days))
+                return {
+                    "value": value,
+                    "method": "month",
+                    "reason": None,
+                    "window": {"start": m_start.isoformat(), "end": m_end.isoformat(), "days": int(days)},
+                    "denom": float(purchases_month),
+                    "ap_end": float(ap_end),
+                    "required_denom": float(required),
+                }
+
+            purchases_trailing = self._purchases_between(db, t_start, t_end)
+            if purchases_trailing < required:
+                return {
+                    "value": None,
+                    "method": "trailing_90d",
+                    "reason": (
+                        "Compras insuficientes para estimar DPO con confianza "
+                        f"(mes={float(purchases_month):.2f}, trailing={float(purchases_trailing):.2f}, "
+                        f"required={float(required):.2f})."
+                    ),
+                    "window": {"start": t_start.isoformat(), "end": t_end.isoformat(), "days": int(window_days)},
+                    "denom": float(purchases_trailing),
+                    "ap_end": float(ap_end),
+                    "required_denom": float(required),
+                }
+
+            value = float((ap_end / purchases_trailing) * Decimal(int(window_days)))
+            return {
+                "value": value,
+                "method": "trailing_90d",
+                "reason": (
+                    "Compras del mes insuficientes; se usó ventana trailing para estimar DPO "
+                    f"(mes={float(purchases_month):.2f} < required={float(required):.2f})."
+                ),
+                "window": {"start": t_start.isoformat(), "end": t_end.isoformat(), "days": int(window_days)},
+                "denom": float(purchases_trailing),
+                "ap_end": float(ap_end),
+                "required_denom": float(required),
+            }
         finally:
             db.close()

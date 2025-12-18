@@ -215,23 +215,65 @@ class Agent(BaseAgent):
         return "\n".join(lines), {"dso": dso, "dpo": dpo, "ccc": ccc, "cash": cash}
 
     def _extract_aging(self, trace: List[Dict[str, Any]], agent_name: str) -> Dict[str, Any]:
+        """
+        Devuelve un dict con:
+        {
+            "overdue": {...},   # SOLO vencido
+            "current": {...},   # NO vencido / por vencer
+            "legacy": {...},    # compat: data["aging"] si existe
+        }
+        """
         for res in trace or []:
             if res.get("agent") == agent_name:
                 data = res.get("data") or {}
-                aging = data.get("aging")
-                if isinstance(aging, dict):
-                    return aging
-        return {}
+
+                overdue = data.get("aging_overdue")
+                current = data.get("aging_current")
+                legacy = data.get("aging")
+
+                out = {"overdue": {}, "current": {}, "legacy": {}}
+
+                if isinstance(overdue, dict):
+                    out["overdue"] = overdue
+                if isinstance(current, dict):
+                    out["current"] = current
+                if isinstance(legacy, dict):
+                    out["legacy"] = legacy
+                return out
+
+        return {"overdue": {}, "current": {}, "legacy": {}}
+
 
     def _extract_context(self, trace: List[Dict[str, Any]]) -> Dict[str, Any]:
         ctx: Dict[str, Any] = {
             "kpis": {"DSO": None, "DPO": None, "DIO": None, "CCC": None},
+
+            # overdue/current separados (no ambiguo)
+            "aging_cxc_overdue": {},
+            "aging_cxc_current": {},
+            "aging_cxp_overdue": {},
+            "aging_cxp_current": {},
+
+            # compat: lo que ya usaba el gerente antes (solo vencido si existe)
             "aging_cxc": {},
             "aging_cxp": {},
+
             "balances": {},
         }
-        ctx["aging_cxc"] = self._extract_aging(trace, "aaav_cxc")
-        ctx["aging_cxp"] = self._extract_aging(trace, "aaav_cxp")
+
+        cxc_pack = self._extract_aging(trace, "aaav_cxc")
+        cxp_pack = self._extract_aging(trace, "aaav_cxp")
+
+        # CxC
+        ctx["aging_cxc_overdue"] = cxc_pack.get("overdue") or {}
+        ctx["aging_cxc_current"] = cxc_pack.get("current") or {}
+        ctx["aging_cxc"] = cxc_pack.get("legacy") or ctx["aging_cxc_overdue"] or {}
+
+        # CxP (si todavía no tenés aging_current en CxP, esto igual no rompe)
+        ctx["aging_cxp_overdue"] = cxp_pack.get("overdue") or {}
+        ctx["aging_cxp_current"] = cxp_pack.get("current") or {}
+        ctx["aging_cxp"] = cxp_pack.get("legacy") or ctx["aging_cxp_overdue"] or {}
+
         for res in trace or []:
             data = res.get("data") or {}
             kpi = data.get("kpi") or {}
@@ -239,10 +281,13 @@ class Agent(BaseAgent):
                 for k in ("DSO", "DPO", "DIO", "CCC"):
                     if ctx["kpis"].get(k) is None and k in kpi:
                         ctx["kpis"][k] = self._coerce_float(kpi.get(k))
+
             bal = data.get("balances") or {}
             if isinstance(bal, dict) and not ctx["balances"]:
                 ctx["balances"] = {str(k): self._coerce_float(v) for k, v in bal.items()}
+
         return ctx
+
     
     def _extract_operational_totals(
         self,
@@ -332,13 +377,10 @@ class Agent(BaseAgent):
             if isinstance(v, (int, float)):
                 return True
 
-        # 3) Aging con algo distinto de cero
-        for bucket in ("aging_cxc", "aging_cxp"):
+        # 3) Aging: vencido o por vencer con algo distinto de cero
+        for bucket in ("aging_cxc_overdue", "aging_cxp_overdue", "aging_cxc_current", "aging_cxp_current", "aging_cxc", "aging_cxp"):
             aging = ctx.get(bucket) or {}
-            if any(
-                isinstance(aging.get(b), (int, float)) and aging.get(b) != 0
-                for b in ("0_30", "31_60", "61_90", "90_plus")
-            ):
+            if any(isinstance(v, (int, float)) and v != 0 for v in (aging or {}).values()):
                 return True
 
         # 4) Balances con algún valor numérico
@@ -364,7 +406,7 @@ class Agent(BaseAgent):
             hyps.append("DPO bajo indica negociación débil o pagos anticipados no alineados a caja.")
         if isinstance(ccc, (int, float)) and ccc > 20:
             hyps.append("CCC positivo alto indica presión de caja; probable inventario/AR alto vs AP.")
-        share_31_60 = aging_cxp.get("31_60")
+        share_31_60 = aging_cxp.get("31_60", aging_cxp.get("overdue_31_60"))
         if isinstance(share_31_60, (int, float)) and share_31_60 > 0:
             hyps.append("Proporción relevante de CxP en 31–60 días puede tensar pagos si no se calendariza.")
         return hyps
@@ -470,17 +512,18 @@ class Agent(BaseAgent):
             "generales": [],
         }
 
-        aging_cxc = ctx.get("aging_cxc") or {}
-        aging_cxp = ctx.get("aging_cxp") or {}
+        aging_cxc = ctx.get("aging_cxc_overdue") or ctx.get("aging_cxc") or {}
+        aging_cxp = ctx.get("aging_cxp_overdue") or ctx.get("aging_cxp") or {}
 
-        cxc_vencidas = any(
-            isinstance(aging_cxc.get(bucket), (int, float)) and aging_cxc.get(bucket) > 0
-            for bucket in ("31_60", "61_90", "90_plus")
-        )
-        cxp_vencidas = any(
-            isinstance(aging_cxp.get(bucket), (int, float)) and aging_cxp.get(bucket) > 0
-            for bucket in ("31_60", "61_90", "90_plus")
-        )
+        legacy = ("0_30", "31_60", "61_90", "90_plus")
+        new = ("overdue_1_30", "overdue_31_60", "overdue_61_90", "overdue_90_plus")
+
+        def _has_any_overdue(a: Dict[str, Any]) -> bool:
+            keys = legacy if any(k in a for k in legacy) else new
+            return any(isinstance(a.get(k), (int, float)) and a.get(k) > 0 for k in keys)
+
+        cxc_vencidas = _has_any_overdue(aging_cxc)
+        cxp_vencidas = _has_any_overdue(aging_cxp)
 
         for r in rules or []:
             if not isinstance(r, dict):
@@ -754,6 +797,26 @@ class Agent(BaseAgent):
 
         return report
 
+    def _sum_aging_overdue(self, aging: Dict[str, Any]) -> float:
+        """
+        Suma SOLO vencido.
+        Soporta:
+        - legacy: 0_30, 31_60, 61_90, 90_plus
+        - nuevo: overdue_1_30, overdue_31_60, overdue_61_90, overdue_90_plus
+        """
+        total = 0.0
+
+        legacy_keys = ("0_30", "31_60", "61_90", "90_plus")
+        new_keys = ("overdue_1_30", "overdue_31_60", "overdue_61_90", "overdue_90_plus")
+
+        keys = legacy_keys if any(k in (aging or {}) for k in legacy_keys) else new_keys
+
+        for k in keys:
+            v = self._coerce_float((aging or {}).get(k))
+            if v is not None:
+                total += v
+
+        return float(total)
 
     # -------------------------
     # Handler principal
@@ -772,6 +835,10 @@ class Agent(BaseAgent):
 
         # 2) Contexto data-grounded + fuzzy (solo como señal cualitativa)
         ctx = self._extract_context(trace)
+        overdue_cxc_total = self._sum_aging_overdue(ctx.get("aging_cxc_overdue") or ctx.get("aging_cxc") or {})
+        overdue_cxp_total = self._sum_aging_overdue(ctx.get("aging_cxp_overdue") or ctx.get("aging_cxp") or {})
+
+
         fuzzy_signals = self._build_fuzzy_signals(metrics)
         # Totales operativos para CxC/CxP y NWC (para resumen y BSC)
         op_totals = self._extract_operational_totals(trace, ctx)
@@ -783,9 +850,10 @@ class Agent(BaseAgent):
         try:
             causal_traditional = causal_hypotheses(
                 trace,
-                ctx.get("aging_cxc") or {},
-                ctx.get("aging_cxp") or {},
+                ctx.get("aging_cxc_overdue") or ctx.get("aging_cxc") or {},
+                ctx.get("aging_cxp_overdue") or ctx.get("aging_cxp") or {},
             )
+
         except TypeError:
             causal_traditional = causal_hypotheses(trace)
 
@@ -902,8 +970,13 @@ class Agent(BaseAgent):
             f"Pregunta: {question}\n\n"
             f"== CONTEXTO NUMÉRICO ==\n"
             f"KPIs: {ctx.get('kpis')}\n"
-            f"Aging CxC: {ctx.get('aging_cxc')}\n"
-            f"Aging CxP: {ctx.get('aging_cxp')}\n"
+            f"Aging CxC OVERDUE (vencido): {ctx.get('aging_cxc_overdue')}\n"
+            f"Aging CxC CURRENT (no vencido / por vencer): {ctx.get('aging_cxc_current')}\n"
+            f"Aging CxP OVERDUE (vencido): {ctx.get('aging_cxp_overdue')}\n"
+            f"Aging CxP CURRENT (no vencido / por vencer): {ctx.get('aging_cxp_current')}\n"
+            f"CxC overdue_total (sum aging buckets): {overdue_cxc_total}\n"
+            f"CxP overdue_total (sum aging buckets): {overdue_cxp_total}\n"
+            f"NOTA: 'OVERDUE' = ref_date > due_date. 'CURRENT' = ref_date <= due_date.\n"
             f"Balances: {ctx.get('balances')}\n\n"
             f"== SEÑALES DIFUSAS (fuzzy_signals, solo cualitativas) ==\n"
             f"{json.dumps(fuzzy_signals, ensure_ascii=False, indent=2)}\n\n"
