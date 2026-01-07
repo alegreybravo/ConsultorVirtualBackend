@@ -1,9 +1,10 @@
 # app/repo_finanzas_db.py
 from datetime import datetime, timedelta
 from decimal import Decimal
+from sqlalchemy import func
 
 from .database import SessionLocal
-from app.models import FacturaCXC, FacturaCXP
+from app.models import FacturaCXC, FacturaCXP, Entidad
 
 
 def _month_bounds(year: int, month: int):
@@ -110,9 +111,7 @@ class FinanzasRepoDB:
         try:
             ar_end = self._ar_end(db, m_end)
 
-            # Umbral requerido para considerar "mes" válido
             required = self._required_denom(ar_end, min_abs_denom, min_ratio)
-            # Mantener compat: si min_denominator es mayor, respétalo
             try:
                 required = max(required, Decimal(min_denominator))
             except Exception:
@@ -132,7 +131,6 @@ class FinanzasRepoDB:
                     "required_denom": float(required),
                 }
 
-            # fallback trailing
             sales_trailing = self._sales_between(db, t_start, t_end)
             if sales_trailing < required:
                 return {
@@ -235,6 +233,183 @@ class FinanzasRepoDB:
                 "denom": float(purchases_trailing),
                 "ap_end": float(ap_end),
                 "required_denom": float(required),
+            }
+        finally:
+            db.close()
+
+    # ---------- CXC-03: vencimientos en rango ----------
+    def cxc_due_between(self, start: datetime, end: datetime) -> dict:
+        """
+        Cuenta facturas CxC cuyo vencimiento (fecha_limite) cae dentro de [start, end]
+        y calcula el saldo pendiente total.
+        """
+        if start.tzinfo:
+            start = start.replace(tzinfo=None)
+        if end.tzinfo:
+            end = end.replace(tzinfo=None)
+
+        db = SessionLocal()
+        try:
+            q = (
+                db.query(FacturaCXC)
+                .filter(
+                    FacturaCXC.fecha_limite >= start,
+                    FacturaCXC.fecha_limite <= end,
+                    FacturaCXC.pagada == False,
+                )
+            )
+
+            count = 0
+            total = Decimal("0")
+
+            for f in q:
+                saldo = _saldo(f.monto, f.monto_pagado)
+                if saldo > 0:
+                    count += 1
+                    total += saldo
+
+            return {
+                "count": count,
+                "total": float(total),
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+                "source": "db",
+            }
+        finally:
+            db.close()
+
+    # ---------- CXC-04: Top N clientes por saldo CxC abierto a una fecha ----------
+    def cxc_top_clients_open(self, as_of: datetime, limit: int = 5) -> dict:
+        """
+        Top N clientes por saldo abierto CxC (saldo pendiente > 0) al 'as_of'.
+
+        Nota: como la BD no tiene historial de pagos por fecha, esto usa:
+          - facturas emitidas <= as_of
+          - pagada = false
+          - saldo actual (monto - coalesce(monto_pagado,0))
+        Agrupa por id_entidad_cliente y devuelve nombre desde tabla entidad.
+        """
+        if as_of.tzinfo:
+            as_of = as_of.replace(tzinfo=None)
+
+        limit = int(limit or 5)
+        if limit <= 0:
+            limit = 5
+
+        db = SessionLocal()
+        try:
+            saldo_expr = func.greatest(FacturaCXC.monto - func.coalesce(FacturaCXC.monto_pagado, 0), 0)
+
+            # nombre: preferí nombre_comercial, si no nombre_legal
+            nombre_expr = func.coalesce(Entidad.nombre_comercial, Entidad.nombre_legal).label("cliente_nombre")
+
+            q = (
+                db.query(
+                    FacturaCXC.id_entidad_cliente.label("id_entidad_cliente"),
+                    nombre_expr,
+                    func.count(FacturaCXC.id_cxc).label("count"),
+                    func.sum(saldo_expr).label("saldo_total"),
+                )
+                .join(Entidad, Entidad.id_entidad == FacturaCXC.id_entidad_cliente)
+                .filter(
+                    FacturaCXC.fecha_emision <= as_of,
+                    FacturaCXC.pagada == False,
+                    saldo_expr > 0,
+                )
+                .group_by(FacturaCXC.id_entidad_cliente, nombre_expr)
+                .order_by(func.sum(saldo_expr).desc())
+                .limit(limit)
+            )
+
+            rows = []
+            for cid, nombre, cnt, saldo_total in q.all():
+                rows.append({
+                    "id_entidad_cliente": int(cid or 0),
+                    "cliente_nombre": str(nombre or "").strip() or f"Cliente #{int(cid or 0)}",
+                    "count": int(cnt or 0),
+                    "saldo_total": float(saldo_total or 0),
+                })
+
+            return {
+                "as_of": as_of.isoformat(),
+                "limit": limit,
+                "rows": rows,
+                "source": "db",
+            }
+        finally:
+            db.close()
+
+    # ---------- ✅ CXC-06: Facturas CxC que vencen en una fecha (lista + saldos) ----------
+    def cxc_invoices_due_on(self, day: datetime) -> dict:
+        """
+        Lista facturas CxC cuyo vencimiento (fecha_limite) cae en el día indicado (00:00:00 - 23:59:59),
+        con su saldo pendiente y el nombre del cliente (Entidad).
+
+        Devuelve:
+          {
+            "date": "YYYY-MM-DD",
+            "count": int,
+            "total": float,
+            "rows": [
+              {
+                "id_cxc": int,
+                "id_entidad_cliente": int,
+                "cliente_nombre": str,
+                "fecha_limite": "YYYY-MM-DD",
+                "saldo_total": float
+              }, ...
+            ],
+            "source": "db"
+          }
+        """
+        if day.tzinfo:
+            day = day.replace(tzinfo=None)
+
+        day_start = datetime(day.year, day.month, day.day, 0, 0, 0)
+        day_end = datetime(day.year, day.month, day.day, 23, 59, 59)
+
+        db = SessionLocal()
+        try:
+            saldo_expr = func.greatest(FacturaCXC.monto - func.coalesce(FacturaCXC.monto_pagado, 0), 0).label("saldo_total")
+            nombre_expr = func.coalesce(Entidad.nombre_comercial, Entidad.nombre_legal).label("cliente_nombre")
+
+            q = (
+                db.query(
+                    FacturaCXC.id_cxc.label("id_cxc"),
+                    FacturaCXC.id_entidad_cliente.label("id_entidad_cliente"),
+                    nombre_expr,
+                    FacturaCXC.fecha_limite.label("fecha_limite"),
+                    saldo_expr,
+                )
+                .join(Entidad, Entidad.id_entidad == FacturaCXC.id_entidad_cliente)
+                .filter(
+                    FacturaCXC.pagada == False,
+                    FacturaCXC.fecha_limite >= day_start,
+                    FacturaCXC.fecha_limite <= day_end,
+                    saldo_expr > 0,
+                )
+                .order_by(saldo_expr.desc())
+            )
+
+            rows = []
+            total = Decimal("0")
+            for id_cxc, cid, nombre, fecha_limite, saldo_total in q.all():
+                st = Decimal(saldo_total or 0)
+                total += st
+                rows.append({
+                    "id_cxc": int(id_cxc or 0),
+                    "id_entidad_cliente": int(cid or 0),
+                    "cliente_nombre": str(nombre or "").strip() or f"Cliente #{int(cid or 0)}",
+                    "fecha_limite": (fecha_limite.date().isoformat() if isinstance(fecha_limite, datetime) else str(fecha_limite)[:10]),
+                    "saldo_total": float(st),
+                })
+
+            return {
+                "date": day_start.date().isoformat(),
+                "count": int(len(rows)),
+                "total": float(total),
+                "rows": rows,
+                "source": "db",
             }
         finally:
             db.close()

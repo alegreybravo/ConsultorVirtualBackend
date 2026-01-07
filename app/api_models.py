@@ -54,6 +54,7 @@ class ChatResponse(BaseModel):
     period: Optional[PeriodInfo] = None
     kpis: Optional[KPIBlock] = None
     resumen_ejecutivo: Optional[str] = None
+    executive_context: Optional[Dict[str, Any]] = None
 
     hallazgos: List[Hallazgo] = []
     ordenes: List[Orden] = []

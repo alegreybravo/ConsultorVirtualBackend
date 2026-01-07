@@ -1,5 +1,15 @@
-version: "1.0"
+version: "1.1"
 domain: "gerente_virtual_kb"
+
+# -------------------------------------------------------------------
+# ESTRUCTURA / CONVENIOS (para que el backend/LLM sepa cómo usarlo)
+# -------------------------------------------------------------------
+kb_conventions:
+  impact_levels: ["alto", "medio", "bajo"]
+  impact_score_range: [1, 5]
+  orders_schema:
+    required_fields: ["title", "owner", "kpi", "impacto", "due_offset_days"]
+  bsc_dimensions: ["finanzas", "clientes", "procesos_internos", "aprendizaje_crecimiento"]
 
 agents:
 
@@ -53,6 +63,32 @@ agents:
             level: "bajo"
           - dimension: "conducta_dinero"
             level: "bajo"
+        bsc:
+          primary: "aprendizaje_crecimiento"
+          secondary: ["procesos_internos"]
+        impact:
+          label: "medio"
+          score: 3
+          rationale: "Mejoras en disciplina personal suelen elevar consistencia operativa, pero el impacto financiero es indirecto."
+        effects:
+          causes:
+            - "Falta de gestión del tiempo"
+            - "Baja sistematización del conocimiento"
+            - "Cultura débil del dinero"
+          effects:
+            - "Decisiones reactivas"
+            - "Retrabajos / fricción"
+        orders:
+          - title: "Bloques semanales de revisión gerencial (agenda fija)"
+            owner: "Gerencia"
+            kpi: "Procesos"
+            impacto: "medio"
+            due_offset_days: 7
+          - title: "Bitácora de decisiones (1 página semanal)"
+            owner: "Gerencia"
+            kpi: "Procesos"
+            impacto: "medio"
+            due_offset_days: 14
         recommendation:
           short: "El gerente requiere ordenar su gestión personal antes de escalar."
           detailed: >
@@ -69,6 +105,31 @@ agents:
         scope: ["contexto_pyme"]
         triggers:
           keywords: ["desorden", "caos", "muchos problemas", "no hay tiempo"]
+        bsc:
+          primary: "procesos_internos"
+          secondary: ["finanzas"]
+        impact:
+          label: "alto"
+          score: 4
+          rationale: "Reducir fricción suele mejorar tiempos, costos y control; alta prioridad para estabilizar la operación."
+        effects:
+          causes:
+            - "Procesos no definidos"
+            - "Roles sin claridad"
+          effects:
+            - "Errores / retrabajos"
+            - "Pérdida de productividad"
+        orders:
+          - title: "Mapa simple de procesos críticos (ventas→cobro, compra→pago)"
+            owner: "Administración"
+            kpi: "Procesos"
+            impacto: "alto"
+            due_offset_days: 10
+          - title: "RACI básico por proceso (quién hace qué)"
+            owner: "Administración"
+            kpi: "Procesos"
+            impacto: "alto"
+            due_offset_days: 14
         recommendation:
           short: "Reducir fricción interna antes de modelos avanzados."
           detailed: >
@@ -90,6 +151,24 @@ agents:
           - metric: "nivel_exploracion"
             op: "<"
             value: 0.3
+        bsc:
+          primary: "aprendizaje_crecimiento"
+          secondary: ["clientes", "procesos_internos"]
+        impact:
+          label: "medio"
+          score: 3
+          rationale: "Iniciar innovación eficiente mejora competitividad sin gran riesgo; impacto gradual."
+        effects:
+          causes:
+            - "Enfoque excesivo en operación"
+          effects:
+            - "Estancamiento de propuesta de valor"
+        orders:
+          - title: "Definir 1–2 proyectos de innovación eficiente"
+            owner: "Gerencia"
+            kpi: "Crecimiento"
+            impacto: "medio"
+            due_offset_days: 21
         recommendation:
           short: "Iniciar innovación eficiente antes que transformativa."
           detailed: >
@@ -108,6 +187,31 @@ agents:
           - metric: "ccc"
             op: ">"
             value: 10
+        bsc:
+          primary: "finanzas"
+          secondary: ["procesos_internos"]
+        impact:
+          label: "alto"
+          score: 5
+          rationale: "CCC > 10 suele generar presión de caja y riesgo de incumplimientos."
+        effects:
+          causes:
+            - "Cobranza lenta (DSO alto)"
+            - "Pagos muy rápidos (DPO bajo)"
+          effects:
+            - "Presión de liquidez / caja"
+            - "Mayor necesidad de capital de trabajo"
+        orders:
+          - title: "Calendario AR/AP semanal + control de caja"
+            owner: "Administración"
+            kpi: "CCC"
+            impacto: "alto"
+            due_offset_days: 7
+          - title: "Freeze gastos no esenciales (30d)"
+            owner: "Administración"
+            kpi: "CCC"
+            impacto: "alto"
+            due_offset_days: 2
         recommendation:
           short: "CCC mayor a 10 días: vigilar la presión de caja."
           detailed: >
@@ -126,6 +230,25 @@ agents:
           - metric: "dpo"
             op: "<="
             value: 5
+        bsc:
+          primary: "finanzas"
+          secondary: ["procesos_internos"]
+        impact:
+          label: "medio"
+          score: 3
+          rationale: "Pagar demasiado rápido reduce liquidez; el impacto depende del nivel de caja y CxC."
+        effects:
+          causes:
+            - "Pagos de contado / sin negociación"
+          effects:
+            - "Reducción de liquidez"
+            - "Tensión del ciclo de caja si DSO no acompaña"
+        orders:
+          - title: "Renegociar 3 proveedores clave (15–30 días)"
+            owner: "CxP"
+            kpi: "DPO"
+            impacto: "medio"
+            due_offset_days: 14
         recommendation:
           short: "Se paga demasiado rápido a proveedores."
           detailed: >
@@ -203,6 +326,24 @@ agents:
         scope: ["adm", "productividad"]
         triggers:
           keywords: ["no tengo datos", "no llevo contabilidad", "no sé mis costos"]
+        bsc:
+          primary: "procesos_internos"
+          secondary: ["finanzas"]
+        impact:
+          label: "medio"
+          score: 3
+          rationale: "Permite decisiones básicas sin contabilidad formal; impacto sube si se usa consistentemente."
+        effects:
+          causes:
+            - "Ausencia de registros contables"
+          effects:
+            - "Decisiones con incertidumbre"
+        orders:
+          - title: "MCVU básico con datos declarados (PV, CV, CF)"
+            owner: "Administración"
+            kpi: "Productividad"
+            impacto: "medio"
+            due_offset_days: 14
         recommendation:
           short: "Aplicar MCVU consultivo con valores declarados por el dueño."
           detailed: >
@@ -219,6 +360,24 @@ agents:
           - metric: "costos_fijos_relativos"
             op: ">"
             value: 0.5
+        bsc:
+          primary: "finanzas"
+          secondary: ["procesos_internos"]
+        impact:
+          label: "alto"
+          score: 4
+          rationale: "Costos fijos altos elevan el punto de equilibrio y el riesgo operativo."
+        effects:
+          causes:
+            - "Estructura de gastos rígida"
+          effects:
+            - "Mayor riesgo de pérdida en meses bajos"
+        orders:
+          - title: "Revisión de gastos fijos (alquiler, planilla, admin)"
+            owner: "Administración"
+            kpi: "Costos"
+            impacto: "alto"
+            due_offset_days: 14
         recommendation:
           short: "Reducir gastos fijos y evitar compromisos innecesarios."
           detailed: >
@@ -234,6 +393,24 @@ agents:
           - metric: "margen_contribucion"
             op: "<"
             value: 0.2
+        bsc:
+          primary: "finanzas"
+          secondary: ["clientes"]
+        impact:
+          label: "alto"
+          score: 4
+          rationale: "Margen bajo debilita capacidad de cubrir costos fijos y sostener el negocio."
+        effects:
+          causes:
+            - "Costos variables altos o precio bajo"
+          effects:
+            - "Rentabilidad frágil"
+        orders:
+          - title: "Ajuste de precios / costos variables (top 5 productos)"
+            owner: "Administración"
+            kpi: "Margen"
+            impacto: "alto"
+            due_offset_days: 21
         recommendation:
           short: "Revisar precios y costos variables."
           detailed: >
@@ -247,6 +424,24 @@ agents:
         scope: ["adm", "productividad"]
         triggers:
           keywords: ["varias líneas", "muchos productos", "categorías", "sucursales"]
+        bsc:
+          primary: "procesos_internos"
+          secondary: ["finanzas"]
+        impact:
+          label: "medio"
+          score: 3
+          rationale: "La segmentación por línea permite detectar pérdidas ocultas; impacto incremental."
+        effects:
+          causes:
+            - "Complejidad sin métricas por línea"
+          effects:
+            - "Subsidios cruzados / rentabilidad confusa"
+        orders:
+          - title: "Punto de equilibrio y MCU por línea/categoría"
+            owner: "Administración"
+            kpi: "Rentabilidad"
+            impacto: "medio"
+            due_offset_days: 21
         recommendation:
           short: "Aplicar punto de equilibrio por línea o categoría."
           detailed: >
@@ -326,6 +521,19 @@ agents:
         scope: ["operativo"]
         triggers:
           schedule: "lunes_06_00"
+        bsc:
+          primary: "procesos_internos"
+          secondary: ["finanzas"]
+        impact:
+          label: "medio"
+          score: 2
+          rationale: "Mejora disciplina operativa y previene moras; impacto moderado."
+        orders:
+          - title: "Reporte semanal CxP (vencen esta semana)"
+            owner: "CxP"
+            kpi: "Procesos"
+            impacto: "medio"
+            due_offset_days: 7
         recommendation:
           short: "Emitir reporte de CxP que vencen esta semana."
           detailed: >
@@ -339,6 +547,19 @@ agents:
         scope: ["operativo"]
         triggers:
           schedule: "primer_dia_habil_mes"
+        bsc:
+          primary: "procesos_internos"
+          secondary: ["finanzas"]
+        impact:
+          label: "medio"
+          score: 2
+          rationale: "Apoya planeación de caja del mes; impacto moderado."
+        orders:
+          - title: "Reporte mensual CxP (vencen este mes)"
+            owner: "CxP"
+            kpi: "Procesos"
+            impacto: "medio"
+            due_offset_days: 30
         recommendation:
           short: "Emitir reporte mensual de CxP del mes."
           detailed: >
@@ -354,6 +575,22 @@ agents:
           - metric: "dias_atraso_promedio"
             op: ">"
             value: 8
+        bsc:
+          primary: "finanzas"
+          secondary: ["procesos_internos"]
+        impact:
+          label: "alto"
+          score: 4
+          rationale: "Atrasos sostenidos elevan riesgo de corte de crédito y continuidad."
+        effects:
+          causes: ["Atraso promedio alto"]
+          effects: ["Penalidades", "Bloqueo de crédito", "Riesgo operativo"]
+        orders:
+          - title: "Comunicación proactiva y reprogramación formal con proveedores"
+            owner: "CxP"
+            kpi: "CxP_vencidas"
+            impacto: "alto"
+            due_offset_days: 5
         recommendation:
           short: "Informar a proveedores y evitar deterioro crediticio."
           detailed: >
@@ -372,6 +609,19 @@ agents:
           - metric: "dias_envejecimiento"
             op: "<="
             value: 7
+        bsc:
+          primary: "procesos_internos"
+          secondary: ["finanzas"]
+        impact:
+          label: "medio"
+          score: 3
+          rationale: "Señal preventiva: aún controlable si se ajusta planeación."
+        orders:
+          - title: "Ajuste de compras y programación de pagos (preventivo)"
+            owner: "CxP"
+            kpi: "Procesos"
+            impacto: "medio"
+            due_offset_days: 14
         recommendation:
           short: "Monitorear pagos y prever flujo."
           detailed: >
@@ -387,6 +637,22 @@ agents:
           - metric: "monto_cxp_vencidas"
             op: ">"
             value: 0
+        bsc:
+          primary: "finanzas"
+          secondary: ["procesos_internos"]
+        impact:
+          label: "medio"
+          score: 4
+          rationale: "CxP vencida genera fricción con proveedores y riesgo de continuidad."
+        effects:
+          causes: ["Mora con proveedores"]
+          effects: ["Recargos", "Restricción de crédito", "Riesgo operativo"]
+        orders:
+          - title: "Calendario de pagos por criticidad + renegociación"
+            owner: "CxP"
+            kpi: "CxP_vencidas"
+            impacto: "medio"
+            due_offset_days: 3
         recommendation:
           short: "Priorizar pagos vencidos o reprogramarlos."
           detailed: >
@@ -408,6 +674,24 @@ agents:
           - metric: "monto_cxp_vencidas"
             op: ">"
             value: 0
+        bsc:
+          primary: "finanzas"
+          secondary: ["procesos_internos"]
+        impact:
+          label: "alto"
+          score: 5
+          rationale: "Escenario de crisis: priorización y negociación inmediata para evitar paro operativo."
+        orders:
+          - title: "Repriorizar pagos (esenciales primero) + renegociar top 3–5 proveedores"
+            owner: "Administración"
+            kpi: "CxP_vencidas"
+            impacto: "alto"
+            due_offset_days: 2
+          - title: "Congelar gastos no esenciales durante el período crítico"
+            owner: "Administración"
+            kpi: "Liquidez"
+            impacto: "alto"
+            due_offset_days: 2
         recommendation:
           short: "Repriorizar pagos y renegociar con proveedores clave."
           detailed: >
@@ -421,13 +705,10 @@ agents:
     formulas:
       envejecimiento_cxp:
         formula: "dias = (cxp_mes * 365) / compras_anuales"
-
       ratio_cxc_cxp:
         formula: "ratio = cxc_total / cxp_total"
-
       vencimiento:
         formula: "fecha_vencimiento = fecha_emision + dias_credito"
-
       vencimiento_ajustado:
         rule: "Si cae sábado o domingo, mover al lunes siguiente."
 
@@ -500,6 +781,19 @@ agents:
         scope: ["operativo"]
         triggers:
           schedule: "lunes_06_00"
+        bsc:
+          primary: "procesos_internos"
+          secondary: ["finanzas"]
+        impact:
+          label: "medio"
+          score: 2
+          rationale: "Mejora planificación de cobro y reduce vencimientos futuros."
+        orders:
+          - title: "Reporte semanal CxC (vencen esta semana)"
+            owner: "CxC"
+            kpi: "Procesos"
+            impacto: "medio"
+            due_offset_days: 7
         recommendation:
           short: "Emitir reporte de CxC que vencen esta semana."
           detailed: >
@@ -513,6 +807,19 @@ agents:
         scope: ["operativo"]
         triggers:
           schedule: "primer_dia_habil_mes"
+        bsc:
+          primary: "procesos_internos"
+          secondary: ["finanzas"]
+        impact:
+          label: "medio"
+          score: 2
+          rationale: "Permite previsión mensual de ingresos por cobro."
+        orders:
+          - title: "Reporte mensual CxC (vencen este mes)"
+            owner: "CxC"
+            kpi: "Procesos"
+            impacto: "medio"
+            due_offset_days: 30
         recommendation:
           short: "Emitir reporte mensual de CxC del mes."
           detailed: >
@@ -527,6 +834,22 @@ agents:
           - metric: "dias_envejecimiento_cxc"
             op: ">"
             value: 8
+        bsc:
+          primary: "finanzas"
+          secondary: ["clientes", "procesos_internos"]
+        impact:
+          label: "alto"
+          score: 4
+          rationale: "Cobro tardío deteriora liquidez y eleva riesgo de incobrables."
+        effects:
+          causes: ["Clientes pagan tarde vs estándar"]
+          effects: ["Presión de caja", "Riesgo de morosidad"]
+        orders:
+          - title: "Revisión de política de crédito + seguimiento de morosidad"
+            owner: "CxC"
+            kpi: "DSO"
+            impacto: "alto"
+            due_offset_days: 21
         recommendation:
           short: "Riesgo alto: clientes pagando mucho más tarde que el sector."
           detailed: >
@@ -542,6 +865,12 @@ agents:
           - metric: "ratio_cxc_cxp"
             op: ">"
             value: 1.0
+        bsc:
+          primary: "finanzas"
+        impact:
+          label: "bajo"
+          score: 2
+          rationale: "Señal de fortaleza de posición neta; requiere validar morosidad."
         recommendation:
           short: "Activo de corto plazo mayor que pasivo."
           detailed: >
@@ -557,6 +886,27 @@ agents:
           - metric: "monto_cxc_vencidas"
             op: ">"
             value: 0
+        bsc:
+          primary: "finanzas"
+          secondary: ["clientes", "procesos_internos"]
+        impact:
+          label: "alto"
+          score: 5
+          rationale: "CxC vencida impacta directamente la caja y puede romper la operación."
+        effects:
+          causes: ["Morosidad / incumplimiento de clientes"]
+          effects: ["Presión de liquidez", "Riesgo de impago a proveedores"]
+        orders:
+          - title: "Campaña dunning top-10 clientes"
+            owner: "CxC"
+            kpi: "CxC_vencidas"
+            impacto: "alto"
+            due_offset_days: 3
+          - title: "Acuerdos de pago + bloqueo temporal de crédito"
+            owner: "CxC"
+            kpi: "CxC_vencidas"
+            impacto: "alto"
+            due_offset_days: 5
         recommendation:
           short: "Acción inmediata sobre CxC vencidas."
           detailed: >
@@ -570,6 +920,19 @@ agents:
         scope: ["consultivo"]
         triggers:
           keywords: ["no llevo control", "no tengo calendario de cobros", "no tengo archivo cxc"]
+        bsc:
+          primary: "procesos_internos"
+          secondary: ["finanzas"]
+        impact:
+          label: "medio"
+          score: 3
+          rationale: "Control básico reduce pérdidas por olvido y mejora disciplina de cobro."
+        orders:
+          - title: "Implementar control básico CxC (Excel/Sheet)"
+            owner: "CxC"
+            kpi: "Procesos"
+            impacto: "medio"
+            due_offset_days: 10
         recommendation:
           short: "Implementar control básico de CxC."
           detailed: >
@@ -593,6 +956,19 @@ agents:
           - metric: "monto_cxc_vencidas"
             op: ">"
             value: 0
+        bsc:
+          primary: "finanzas"
+          secondary: ["clientes"]
+        impact:
+          label: "alto"
+          score: 5
+          rationale: "Mora activa requiere intervención inmediata para recuperar caja."
+        orders:
+          - title: "Segmentar top-10 deudores + acuerdos de pago"
+            owner: "CxC"
+            kpi: "CxC_vencidas"
+            impacto: "alto"
+            due_offset_days: 5
         recommendation:
           short: "Actuar de inmediato sobre las cuentas por cobrar vencidas."
           detailed: >
@@ -614,6 +990,24 @@ agents:
           - metric: "dias_envejecimiento_cxc"
             op: ">"
             value: 60
+        bsc:
+          primary: "finanzas"
+          secondary: ["clientes", "procesos_internos"]
+        impact:
+          label: "alto"
+          score: 5
+          rationale: "Envejecimiento >60 días indica falla de política de crédito y alto riesgo de incobrable."
+        orders:
+          - title: "Dunning escalonado (recordatorio→negociación→escala)"
+            owner: "CxC"
+            kpi: "DSO"
+            impacto: "alto"
+            due_offset_days: 7
+          - title: "Revisión de límites de crédito / garantías"
+            owner: "CxC"
+            kpi: "Riesgo_credito"
+            impacto: "alto"
+            due_offset_days: 21
         recommendation:
           short: "Revisar política de crédito y castigo de cartera."
           detailed: >
@@ -626,13 +1020,10 @@ agents:
     formulas:
       vencimiento_cxc:
         formula: "fecha_vencimiento = fecha_emision + dias_credito"
-
       vencimiento_ajustado_cxc:
         rule: "Si fecha_vencimiento es sábado o domingo, mover al lunes."
-
       envejecimiento_cxc:
         formula: "dias = (cxc_mes * 365) / compras_o_ventas_anuales"
-
       ratio_cxc_cxp:
         formula: "ratio = cxc_total / cxp_total"
 
@@ -699,6 +1090,18 @@ agents:
           - metric: "flujo_neto"
             op: "<"
             value: 0
+        bsc:
+          primary: "finanzas"
+        impact:
+          label: "alto"
+          score: 5
+          rationale: "Déficit de caja proyectado requiere acción inmediata para evitar impagos."
+        orders:
+          - title: "Ajustar egresos y reprogramar pagos (flujo neto negativo)"
+            owner: "Administración"
+            kpi: "Flujo_neto"
+            impacto: "alto"
+            due_offset_days: 3
         recommendation:
           short: "Déficit proyectado: revisar egresos y reprogramar pagos."
           detailed: >
@@ -714,6 +1117,18 @@ agents:
           - metric: "flujo_neto"
             op: ">"
             value: 0
+        bsc:
+          primary: "finanzas"
+        impact:
+          label: "medio"
+          score: 3
+          rationale: "Permite fortalecer caja o pagar deuda cara; decisión estratégica."
+        orders:
+          - title: "Plan de uso de superávit (caja→deuda→inversión)"
+            owner: "Gerencia"
+            kpi: "Flujo_neto"
+            impacto: "medio"
+            due_offset_days: 14
         recommendation:
           short: "Superávit: evaluar inversión o reducción de deuda."
           detailed: >
@@ -728,6 +1143,18 @@ agents:
           - metric: "saldo_final"
             op: "<"
             value: 50000
+        bsc:
+          primary: "finanzas"
+        impact:
+          label: "alto"
+          score: 5
+          rationale: "Caja final muy baja eleva el riesgo de interrupción por imprevistos."
+        orders:
+          - title: "Definir mínimo de caja operativa y plan de contingencia"
+            owner: "Gerencia"
+            kpi: "Caja"
+            impacto: "alto"
+            due_offset_days: 7
         recommendation:
           short: "Saldo de caja muy bajo."
           detailed: >
@@ -743,6 +1170,19 @@ agents:
           - metric: "egresos"
             op: ">"
             value: "ingresos"
+        bsc:
+          primary: "finanzas"
+          secondary: ["procesos_internos"]
+        impact:
+          label: "alto"
+          score: 4
+          rationale: "Desbalance recurrente rompe sostenibilidad; requiere ajuste de gastos/calendario."
+        orders:
+          - title: "Revisión de egresos vs ingresos (presupuesto mensual)"
+            owner: "Administración"
+            kpi: "Egresos"
+            impacto: "alto"
+            due_offset_days: 14
         recommendation:
           short: "Egresos superan ingresos: ajustar plan."
           detailed: >
@@ -758,6 +1198,18 @@ agents:
           - metric: "variacion_trimestral"
             op: ">"
             value: 0.30
+        bsc:
+          primary: "finanzas"
+        impact:
+          label: "medio"
+          score: 3
+          rationale: "Variabilidad alta exige reservas y planeación; impacto depende de estacionalidad."
+        orders:
+          - title: "Fondo de reserva para estacionalidad (regla 30%)"
+            owner: "Gerencia"
+            kpi: "Riesgo_estacional"
+            impacto: "medio"
+            due_offset_days: 30
         recommendation:
           short: "Alta variabilidad: revisar estacionalidad."
           detailed: >
@@ -769,10 +1221,8 @@ agents:
     formulas:
       flujo_neto:
         formula: "flujo_neto = ingresos - egresos"
-
       saldo_final:
         formula: "saldo_final = saldo_inicial + flujo_neto"
-
       variacion_trimestral:
         formula: "variacion = (flujo_t2 - flujo_t1) / flujo_t1"
 
@@ -834,6 +1284,18 @@ agents:
           - metric: "utilidad_operativa"
             op: "<"
             value: 0
+        bsc:
+          primary: "finanzas"
+        impact:
+          label: "alto"
+          score: 5
+          rationale: "Pérdida operativa sostenida pone en riesgo la continuidad."
+        orders:
+          - title: "Plan de reducción de costos / mejora de ingresos (utilidad negativa)"
+            owner: "Gerencia"
+            kpi: "Utilidad_operativa"
+            impacto: "alto"
+            due_offset_days: 14
         recommendation:
           short: "Empresa operando con pérdida."
           detailed: >
@@ -849,6 +1311,18 @@ agents:
           - metric: "variacion_activos_corrientes"
             op: "<"
             value: 0
+        bsc:
+          primary: "finanzas"
+        impact:
+          label: "medio"
+          score: 3
+          rationale: "Disminución de activos corrientes reduce colchón de liquidez."
+        orders:
+          - title: "Revisar caja, CxC e inventarios (AC a la baja)"
+            owner: "Administración"
+            kpi: "Activos_corrientes"
+            impacto: "medio"
+            due_offset_days: 21
         recommendation:
           short: "Activos corrientes se reducen."
           detailed: >
@@ -863,6 +1337,19 @@ agents:
           - metric: "capital_trabajo"
             op: "<"
             value: 0
+        bsc:
+          primary: "finanzas"
+          secondary: ["procesos_internos"]
+        impact:
+          label: "alto"
+          score: 5
+          rationale: "Capital de trabajo negativo implica riesgo inmediato de pago."
+        orders:
+          - title: "Plan de choque: cobranzas + negociación CxP (CT negativo)"
+            owner: "Gerencia"
+            kpi: "Capital_trabajo"
+            impacto: "alto"
+            due_offset_days: 7
         recommendation:
           short: "Capital de trabajo insuficiente."
           detailed: >
@@ -874,13 +1361,10 @@ agents:
     formulas:
       utilidad_operativa:
         formula: "utilidad_operativa = total_ingresos - total_costos - gastos_administrativos"
-
       razon_corriente:
         formula: "razon_corriente = activos_corrientes / pasivos_corrientes"
-
       capital_trabajo:
         formula: "capital_trabajo = activos_corrientes - pasivos_corrientes"
-
       margen_operativo:
         formula: "margen_operativo = utilidad_operativa / total_ingresos"
 
@@ -920,6 +1404,12 @@ agents:
         scope: ["restriccion"]
         triggers:
           keywords: ["impuesto", "IVA", "renta", "tributación"]
+        bsc:
+          primary: "procesos_internos"
+        impact:
+          label: "bajo"
+          score: 1
+          rationale: "Es una regla de enrutamiento/alcance."
         recommendation:
           short: "Redirigir temas fiscales al AV Contable-Financiero."
           detailed: >
@@ -933,6 +1423,12 @@ agents:
         scope: ["restriccion"]
         triggers:
           keywords: ["NIIF", "NIC", "estados financieros oficiales"]
+        bsc:
+          primary: "procesos_internos"
+        impact:
+          label: "bajo"
+          score: 1
+          rationale: "Es una regla de enrutamiento/alcance."
         recommendation:
           short: "Redirigir consultas de estados financieros oficiales."
           detailed: >
@@ -946,6 +1442,19 @@ agents:
         scope: ["gerencial"]
         triggers:
           keywords: ["planeación", "control", "decisión", "información interna"]
+        bsc:
+          primary: "procesos_internos"
+          secondary: ["finanzas"]
+        impact:
+          label: "medio"
+          score: 3
+          rationale: "Mejora capacidad de decisión interna con análisis y alternativas."
+        orders:
+          - title: "Resumen gerencial: alternativas y efectos esperados"
+            owner: "Contabilidad"
+            kpi: "Decisión"
+            impacto: "medio"
+            due_offset_days: 14
         recommendation:
           short: "Aplicar contabilidad gerencial."
           detailed: >
@@ -957,13 +1466,10 @@ agents:
     formulas:
       activos_corrientes:
         formula: "AC = caja + cxc + inventarios"
-
       pasivos_corrientes:
         formula: "PC = cxp + salarios_por_pagar + impuestos_por_pagar"
-
       capital_trabajo:
         formula: "CT = AC - PC"
-
       razon_corriente:
         formula: "RC = AC / PC"
 
