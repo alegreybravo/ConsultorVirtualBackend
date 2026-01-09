@@ -413,3 +413,62 @@ class FinanzasRepoDB:
             }
         finally:
             db.close()
+
+
+    def cxc_partial_payments(self, start: datetime, end: datetime) -> dict:
+        """
+        Facturas CxC con pago parcial:
+        monto_pagado > 0 AND saldo > 0
+        """
+        db = SessionLocal()
+        try:
+            saldo_expr = func.greatest(
+                FacturaCXC.monto - func.coalesce(FacturaCXC.monto_pagado, 0),
+                0
+            )
+
+            rows = (
+                db.query(
+                    FacturaCXC.id_cxc,
+                    FacturaCXC.id_entidad_cliente,
+                    Entidad.nombre_comercial,
+                    FacturaCXC.fecha_emision,
+                    FacturaCXC.fecha_limite,
+                    FacturaCXC.monto,
+                    FacturaCXC.monto_pagado,
+                    saldo_expr.label("saldo_pendiente"),
+                )
+                .join(Entidad, Entidad.id_entidad == FacturaCXC.id_entidad_cliente)
+                .filter(
+                    FacturaCXC.pagada == False,
+                    FacturaCXC.monto_pagado > 0,
+                    saldo_expr > 0,
+                    FacturaCXC.fecha_emision >= start,
+                    FacturaCXC.fecha_emision <= end,
+                )
+                .order_by(saldo_expr.desc())
+                .all()
+            )
+
+            total_saldo = sum(r.saldo_pendiente for r in rows)
+
+            return {
+                "count": len(rows),
+                "total_saldo_pendiente": float(total_saldo),
+                "rows": [
+                    {
+                        "id_cxc": r.id_cxc,
+                        "cliente": r.nombre_comercial,
+                        "monto_original": float(r.monto),
+                        "monto_pagado": float(r.monto_pagado),
+                        "saldo_pendiente": float(r.saldo_pendiente),
+                        "fecha_emision": r.fecha_emision.date().isoformat(),
+                        "fecha_limite": r.fecha_limite.date().isoformat(),
+                    }
+                    for r in rows
+                ],
+                "source": "db",
+            }
+        finally:
+            db.close()
+

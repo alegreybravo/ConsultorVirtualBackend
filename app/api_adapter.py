@@ -60,6 +60,8 @@ def build_answer_text(result: Dict[str, Any], intent: Optional[Dict[str, Any]] =
     """
     Prioridades:
       0) intent.top_clientes_cxc -> Top clientes por saldo abierto al corte
+      0b) intent.vencen_hoy_cxc -> Facturas CxC que vencen en una fecha (CXC-06)
+      0c) intent.cxc_pago_parcial -> Facturas CxC con pago parcial (CXC-07)
       1) intent.vencimientos_rango -> texto con conteo/saldo del rango
       2) intent.aging -> texto formateado con buckets
       3) resumen_ejecutivo
@@ -106,12 +108,12 @@ def build_answer_text(result: Dict[str, Any], intent: Optional[Dict[str, Any]] =
 
             header_date = as_of if as_of else "ese corte"
             return f"No se encontraron clientes con saldo CxC abierto al {header_date}."
+
     # -----------------------------------------------------
     # 0b) Facturas CxC que vencen en una fecha (CXC-06)
     # Espera: executive_context.<algo> con {date, count, total, rows:[...]}
     # -----------------------------------------------------
     if intent.get("vencen_hoy_cxc") is True:
-        # intenta varias llaves para ser compatible
         pack = (
             ctx.get("cxc_invoices_due_on")
             or ctx.get("cxc_due_on")
@@ -120,52 +122,126 @@ def build_answer_text(result: Dict[str, Any], intent: Optional[Dict[str, Any]] =
             or {}
         )
 
-        if isinstance(pack, dict) and pack:
-            fecha = _fmt_date(pack.get("date") or pack.get("as_of") or pack.get("on") or "")
-            rows = pack.get("rows") or pack.get("invoices") or []
-            total = _money(pack.get("total") or pack.get("saldo_total") or 0)
-            count = int(pack.get("count") or (len(rows) if isinstance(rows, list) else 0) or 0)
+        if not isinstance(pack, dict) or not pack:
+            return "No hay facturas de CxC que venzan en esa fecha."
 
-            # Si no hay filas, mensaje claro
-            if not isinstance(rows, list) or len(rows) == 0:
-                # ojo: si no vino fecha, igual no revienta
-                label_fecha = fecha or "esa fecha"
-                return f"No hay facturas de CxC que venzan en {label_fecha}."
+        fecha = _fmt_date(pack.get("date") or pack.get("as_of") or pack.get("on") or "")
+        rows = pack.get("rows") or pack.get("invoices") or []
+        total = _money(pack.get("total") or pack.get("saldo_total") or 0)
+        count = int(pack.get("count") or (len(rows) if isinstance(rows, list) else 0) or 0)
 
+        if not isinstance(rows, list) or len(rows) == 0 or count == 0:
             label_fecha = fecha or "esa fecha"
-            lines = [f"Facturas CxC que vencen en {label_fecha} ({count}):"]
+            return f"No hay facturas de CxC que venzan en {label_fecha}."
 
-            i = 1
-            for r in rows:
-                if not isinstance(r, dict):
-                    continue
+        label_fecha = fecha or "esa fecha"
+        lines = [f"Facturas CxC que vencen en {label_fecha} ({count}):"]
 
-                # campos típicos (ajusta según tu repo)
-                num = (
-                    r.get("numero_factura")
-                    or r.get("num_factura")
-                    or r.get("consecutivo")
-                    or r.get("no_factura")
-                    or r.get("id_cxc")
-                )
-                cliente = str(r.get("cliente_nombre") or r.get("nombre_legal") or r.get("cliente") or "").strip()
-                saldo = _money(r.get("saldo") or r.get("saldo_total") or r.get("monto_pendiente") or 0)
+        i = 1
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
 
-                label_cliente = cliente if cliente else "Cliente"
-                label_num = f"Factura {num}" if num not in (None, "", 0) else "Factura"
+            num = (
+                r.get("numero_factura")
+                or r.get("num_factura")
+                or r.get("consecutivo")
+                or r.get("no_factura")
+                or r.get("id_cxc")
+            )
+            cliente = str(
+                r.get("cliente_nombre")
+                or r.get("nombre_legal")
+                or r.get("cliente")
+                or ""
+            ).strip()
+            saldo = _money(r.get("saldo") or r.get("saldo_total") or r.get("monto_pendiente") or 0)
 
-                lines.append(f"{i}) {label_num} - {label_cliente}: ₡{saldo:,.2f}")
-                i += 1
+            label_cliente = cliente if cliente else "Cliente"
+            label_num = f"Factura {num}" if num not in (None, "", 0) else "Factura"
 
-            # opcional: total al final (si lo tenés calculado)
-            if total > 0:
-                lines.append(f"Total saldo: ₡{total:,.2f}")
+            lines.append(f"{i}) {label_num} - {label_cliente}: ₡{saldo:,.2f}")
+            i += 1
 
-            # si por alguna razón no se agregaron líneas
-            if len(lines) > 1:
-                return "\n".join(lines)
+        if total > 0:
+            lines.append(f"Total saldo: ₡{total:,.2f}")
 
-    # si no hay data en executive_context, cae al resumen ejecutivo
+        return "\n".join(lines)
+
+    # -----------------------------------------------------
+    # 0c) Facturas CxC con pago parcial (CXC-07)
+    # Espera: executive_context.cxc_pago_parcial con {count, rows, total_saldo_pendiente}
+    # -----------------------------------------------------
+    if intent.get("cxc_pago_parcial") is True or intent.get("pago_parcial_cxc") is True:
+        pack = (
+            ctx.get("cxc_pago_parcial")
+            or ctx.get("cxc_partial_payments")
+            or ctx.get("cxc_partial")
+            or {}
+        )
+
+        if not isinstance(pack, dict) or not pack:
+            return "No hay facturas de CxC con pagos parciales en el período."
+
+        rows = pack.get("rows") or pack.get("invoices") or []
+        count = int(pack.get("count") or (len(rows) if isinstance(rows, list) else 0) or 0)
+
+        if count == 0 or not isinstance(rows, list) or len(rows) == 0:
+            return "No hay facturas de CxC con pagos parciales en el período."
+
+        total_saldo_pendiente = _money(
+            pack.get("total_saldo_pendiente")
+            or pack.get("total_saldo")
+            or pack.get("total")
+            or 0
+        )
+
+        lines = [f"Facturas CxC con pago parcial ({count}):"]
+
+        for i, r in enumerate(rows, start=1):
+            if not isinstance(r, dict):
+                continue
+
+            cliente = (
+                r.get("cliente")
+                or r.get("cliente_nombre")
+                or r.get("nombre_legal")
+                or r.get("razon_social")
+                or "Cliente"
+            )
+
+            monto_original = _money(
+                r.get("monto_original")
+                or r.get("original")
+                or r.get("total_factura")
+                or r.get("monto_total")
+                or 0
+            )
+            monto_pagado = _money(
+                r.get("monto_pagado")
+                or r.get("pagado")
+                or r.get("total_pagado")
+                or r.get("abono")
+                or 0
+            )
+            saldo_pendiente = _money(
+                r.get("saldo_pendiente")
+                or r.get("saldo")
+                or r.get("monto_pendiente")
+                or 0
+            )
+
+            lines.append(
+                f"{i}) {cliente}: "
+                f"Original ₡{monto_original:,.2f}, "
+                f"Pagado ₡{monto_pagado:,.2f}, "
+                f"Saldo ₡{saldo_pendiente:,.2f}"
+            )
+
+        if total_saldo_pendiente > 0:
+            lines.append(f"Saldo pendiente total: ₡{total_saldo_pendiente:,.2f}")
+
+        return "\n".join(lines)
 
     # -----------------------------------------------------
     # 1) Vencimientos en rango (CXC-03)
@@ -178,7 +254,6 @@ def build_answer_text(result: Dict[str, Any], intent: Optional[Dict[str, Any]] =
             end = _fmt_date(dr.get("end"))
             count = int(dr.get("count") or 0)
 
-            # ✅ en tu result viene como "total"
             saldo_total = _money(dr.get("total"))
             if saldo_total == 0.0:
                 saldo_total = _money(dr.get("saldo_total"))
@@ -231,9 +306,22 @@ def build_answer_text(result: Dict[str, Any], intent: Optional[Dict[str, Any]] =
 # =========================================================
 def build_frontend_payload(result: Dict[str, Any], include_raw: bool) -> ChatResponse:
     # -----------------------------------------------------
-    # Período resuelto
+    # Período resuelto (✅ preferir date_range cuando aplica)
     # -----------------------------------------------------
-    meta = (result.get("_meta") or {}).get("period_resolved") or {}
+    meta_root = (result.get("_meta") or {})
+    period_meta = meta_root.get("period_resolved") or {}
+    intent_meta = meta_root.get("intent") or {}
+    date_range_meta = meta_root.get("date_range") or {}
+
+    use_range = (
+        (intent_meta.get("vencimientos_rango") is True or intent_meta.get("cxc_pago_parcial") is True)
+        and isinstance(date_range_meta, dict)
+        and date_range_meta.get("start")
+        and date_range_meta.get("end")
+    )
+
+    meta = date_range_meta if use_range else period_meta
+
     period = None
     if meta:
         period = PeriodInfo(
@@ -367,7 +455,6 @@ def build_frontend_payload(result: Dict[str, Any], include_raw: bool) -> ChatRes
     # -----------------------------------------------------
     # Texto principal (con intent)
     # -----------------------------------------------------
-    intent_meta = (result.get("_meta") or {}).get("intent") or {}
     answer_text = build_answer_text(result, intent=intent_meta)
 
     return ChatResponse(

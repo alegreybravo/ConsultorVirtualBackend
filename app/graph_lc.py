@@ -14,7 +14,7 @@ from app.utils.knowledge_base import (
 )
 from app.agents.intent import route_intent
 from app.repo_finanzas_db import FinanzasRepoDB
-
+from app.utils.executive_summary import generate_executive_summary
 
 TZ = ZoneInfo("America/Costa_Rica")
 
@@ -287,11 +287,8 @@ def _attach_cxc_due_on(result: Dict[str, Any]) -> None:
         return
 
     repo = FinanzasRepoDB()
-    # ✅ asumimos que ya existe en tu repo:
-    # def cxc_invoices_due_on(self, due_on: datetime) -> dict
     summary = repo.cxc_invoices_due_on(as_of)
 
-    # presentación: solo fecha
     if isinstance(summary.get("date"), str) and len(summary["date"]) >= 10:
         summary["date"] = summary["date"][:10]
 
@@ -300,6 +297,46 @@ def _attach_cxc_due_on(result: Dict[str, Any]) -> None:
     ctx = exec_pack.get("executive_context") or {}
 
     ctx["cxc_due_on"] = summary
+    exec_pack["executive_context"] = ctx
+    gerente["executive_decision_bsc"] = exec_pack
+    result["gerente"] = gerente
+
+
+# --------------------------------------------------------------------
+# ✅ CXC-07: Facturas CxC con pago parcial
+# --------------------------------------------------------------------
+def _attach_cxc_partial_payments(result: Dict[str, Any]) -> None:
+    meta = result.get("_meta") or {}
+    intent = meta.get("intent") or {}
+
+    # ✅ Fix: key correcta + compatibilidad
+    if not (intent.get("cxc_pago_parcial") is True or intent.get("pago_parcial_cxc") is True):
+        return
+
+    # ✅ Fix: preferir rango explícito del usuario (date_range) si existe
+    dr = meta.get("date_range") or {}
+    pr = meta.get("period_resolved") or {}
+
+    start_s = dr.get("start") or pr.get("start")
+    end_s = dr.get("end") or pr.get("end")
+    if not start_s or not end_s:
+        return
+
+    try:
+        start = datetime.fromisoformat(start_s)
+        end = datetime.fromisoformat(end_s)
+    except Exception:
+        return
+
+    repo = FinanzasRepoDB()
+    summary = repo.cxc_partial_payments(start, end)
+
+    gerente = result.get("gerente") or {}
+    exec_pack = gerente.get("executive_decision_bsc") or {}
+    ctx = exec_pack.get("executive_context") or {}
+
+    ctx["cxc_pago_parcial"] = summary
+
     exec_pack["executive_context"] = ctx
     gerente["executive_decision_bsc"] = exec_pack
     result["gerente"] = gerente
@@ -321,8 +358,9 @@ def run_query(
     try:
         intent = route_intent(question)
 
-        # ✅ CXC-03
-        if getattr(intent, "vencimientos_rango", False):
+        # ✅ CXC-03 (extrae 2 fechas si existen)
+        # ✅ Extraer 2 fechas explícitas si el intent lo requiere (CXC-03 o CXC-07)
+        if getattr(intent, "vencimientos_rango", False) or getattr(intent, "cxc_pago_parcial", False):
             start_dt, end_dt = _extract_two_dates(question)
             if start_dt and end_dt:
                 date_range_meta = {
@@ -334,11 +372,11 @@ def run_query(
                     "tz": str(TZ),
                 }
 
+
         # ✅ CXC-06: vencen hoy (con fecha explícita)
         if getattr(intent, "vencen_hoy_cxc", False):
             one = _extract_one_date(question)
 
-            # ✅ fallback: si dicen "hoy" pero no dan fecha, usar hoy real
             if one is None and re.search(r"\b(hoy|para hoy|del día)\b", (question or "").lower()):
                 now = datetime.now(TZ)
                 one = datetime(now.year, now.month, now.day, 23, 59, 59, tzinfo=TZ)
@@ -351,7 +389,6 @@ def run_query(
                     "tz": str(TZ),
                 }
 
-
     except Exception:
         intent = None
         date_range_meta = None
@@ -359,7 +396,10 @@ def run_query(
 
     payload: Dict[str, Any] = {"question": question, "period": period}
 
-    if date_range_meta:
+    # ✅ Fix: si hay rango y el intent es CXC-03 o CXC-07, pasar period_override
+    if date_range_meta and intent is not None and (
+        getattr(intent, "vencimientos_rango", False) or getattr(intent, "cxc_pago_parcial", False)
+    ):
         payload["period_override"] = date_range_meta
 
     router = Router()
@@ -380,7 +420,8 @@ def run_query(
             "aging": False,
             "vencimientos_rango": False,
             "top_clientes_cxc": False,
-            "vencen_hoy_cxc": False,  # ✅ ADD
+            "vencen_hoy_cxc": False,
+            "cxc_pago_parcial": False,  # ✅ Fix: consistencia
             "reason": "intent error",
         }
     result["_meta"] = meta
@@ -413,19 +454,32 @@ def run_query(
     # ✅ CXC-06
     _attach_cxc_due_on(result)
 
+    # ✅ CXC-07
+    _attach_cxc_partial_payments(result)
 
-    print("=== DEBUG GRAPH CXC-06 ===")
-    print("INTENT:", result.get("_meta", {}).get("intent"))
-    print("DUE_ON META:", result.get("_meta", {}).get("due_on"))
-    print("EXEC CTX KEYS:",
-        list(
-            (
-                result.get("gerente", {})
-                .get("executive_decision_bsc", {})
-                .get("executive_context", {})
-            ).keys()
+    # ---------------------------------------------------------
+    # ✅ POST: Resumen ejecutivo consistente con contexto operativo
+    # ---------------------------------------------------------
+    try:
+        exec_pack = (result.get("gerente") or {}).get("executive_decision_bsc") or {}
+        exec_ctx = exec_pack.get("executive_context") or {}
+        intent_meta = (result.get("_meta") or {}).get("intent") or {}
+
+        new_summary = generate_executive_summary(
+            question=question,
+            intent=intent_meta,
+            period_resolved=(result.get("_meta") or {}).get("period_resolved") or {},
+            kpis=(exec_pack.get("kpis") or (result.get("metrics") or {})),
+            executive_context=exec_ctx,
         )
-    )
-    print("==========================")
+
+        if isinstance(new_summary, str) and new_summary.strip():
+            exec_pack["resumen_ejecutivo"] = new_summary.strip()
+            gerente = result.get("gerente") or {}
+            gerente["executive_decision_bsc"] = exec_pack
+            result["gerente"] = gerente
+
+    except Exception:
+        pass
 
     return result
