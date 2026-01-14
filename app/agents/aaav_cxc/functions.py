@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Dict, Any, List, Tuple, Optional
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 import re
 
@@ -30,6 +30,29 @@ class PeriodWindow:
     start: pd.Timestamp
     end: pd.Timestamp
 
+_RX_CUST_1 = re.compile(r"\bsaldo\b.*?\bde\s+(.+?)\s+\bal\b", re.IGNORECASE)
+_RX_CUST_2 = re.compile(r"\bsaldo\b.*?\bde\s+(.+?)\s*$", re.IGNORECASE)
+_RX_CUST_3 = re.compile(r"\bcliente\s+(.+?)\s+\bal\b", re.IGNORECASE)
+_RX_CUST_4 = re.compile(r"\bcliente\s+(.+?)\s*$", re.IGNORECASE)
+
+def _extract_customer_from_question(question: str) -> str:
+    q = (question or "").strip()
+    if not q:
+        return ""
+
+    # casos tipo: "saldo abierto de Panadería La Espiga S.A. al 29/10/2025"
+    for rx in (_RX_CUST_1, _RX_CUST_3):
+        m = rx.search(q)
+        if m:
+            return m.group(1).strip(" ?.,;:")
+
+    # casos donde no hay "al ..."
+    for rx in (_RX_CUST_2, _RX_CUST_4):
+        m = rx.search(q)
+        if m:
+            return m.group(1).strip(" ?.,;:")
+
+    return ""
 
 def resolve_period(payload: Dict[str, Any], state: GlobalState) -> PeriodWindow:
     """
@@ -167,7 +190,8 @@ def build_aging_cxc_db(ref_date: date) -> Dict[str, Any]:
     open_invoices = 0
 
     try:
-        for f in db.query(FacturaCXC):
+        # ✅ mejor consistencia: solo no pagadas
+        for f in db.query(FacturaCXC).filter(FacturaCXC.pagada == False):
             saldo = _saldo_cxc(f)
             if saldo <= 0:
                 continue
@@ -222,8 +246,8 @@ def build_aging_cxc_db(ref_date: date) -> Dict[str, Any]:
 
 def _aging_and_totals_db(ref_date: date) -> Tuple[Dict[str, float], float, float, float, int]:
     """
-    Legacy helper (lo dejo por compatibilidad interna si algo más lo usa):
-      - aging SOLO vencido: 0_30, 31_60, 61_90, 90_plus  (VENCIDOS)
+    Legacy helper:
+      - aging SOLO vencido: 0_30, 31_60, 61_90, 90_plus
       - total_por_cobrar (saldo abierto)
       - current_not_due (NO vencido)
       - no_due_date (saldo sin fecha_limite)
@@ -247,7 +271,7 @@ def _list_top_overdue_db(limit_n: int, ref_date: date) -> List[Dict[str, Any]]:
     db = SessionLocal()
     try:
         rows: List[Dict[str, Any]] = []
-        for f in db.query(FacturaCXC):
+        for f in db.query(FacturaCXC).filter(FacturaCXC.pagada == False):
             saldo = float(_saldo_cxc(f))
             if saldo <= 0:
                 continue
@@ -287,11 +311,7 @@ def _customer_balance_db(name_or_id: str, ref_date: date):
     target = str(name_or_id).strip()
     db = SessionLocal()
     try:
-        cust = (
-            db.query(Entidad)
-            .filter(Entidad.nombre_legal.ilike(target))
-            .first()
-        )
+        cust = db.query(Entidad).filter(Entidad.nombre_legal.ilike(f"%{target}%")).first()
         cust_id = cust.id_entidad if cust else None
         if not cust_id:
             try:
@@ -299,11 +319,17 @@ def _customer_balance_db(name_or_id: str, ref_date: date):
             except Exception:
                 cust_id = None
 
+        # ✅ evita devolver todo el universo si no hay match
+        if not cust_id:
+            return 0.0, []
+
         total = 0.0
         rows: List[Dict[str, Any]] = []
-        q = db.query(FacturaCXC)
-        if cust_id:
-            q = q.filter(FacturaCXC.id_entidad_cliente == cust_id)
+        q = (
+            db.query(FacturaCXC)
+            .filter(FacturaCXC.pagada == False)
+            .filter(FacturaCXC.id_entidad_cliente == cust_id)
+        )
 
         for f in q:
             saldo = float(_saldo_cxc(f))
@@ -336,7 +362,7 @@ def _list_open_db(ref_date: date) -> List[Dict[str, Any]]:
     db = SessionLocal()
     try:
         rows: List[Dict[str, Any]] = []
-        for f in db.query(FacturaCXC):
+        for f in db.query(FacturaCXC).filter(FacturaCXC.pagada == False):
             saldo = float(_saldo_cxc(f))
             if saldo <= 0:
                 continue
@@ -394,17 +420,15 @@ def build_context(win: PeriodWindow, ref_date: date) -> Dict[str, Any]:
     try:
         dso_pack = repo.dso(win.start.year, win.start.month, window_days=90)
         kpi_dso = dso_pack.get("value")
-    except Exception as e:
+    except Exception:
         dso_pack = {"value": None, "method": None, "reason": "Error calculando DSO."}
         kpi_dso = None
-        
 
     try:
         pack = build_aging_cxc_db(ref_date)
     except Exception as e:
         return {"error": f"Error leyendo CxC DB: {e}"}
 
-    # Legacy overdue (solo vencido) para compatibilidad con tu Gerente actual
     aging_legacy = {
         "0_30": float(pack["aging_overdue"].get("overdue_1_30", 0.0)),
         "31_60": float(pack["aging_overdue"].get("overdue_31_60", 0.0)),
@@ -415,19 +439,14 @@ def build_context(win: PeriodWindow, ref_date: date) -> Dict[str, Any]:
     data_norm = {
         "period": win.text,
         "kpi": {"DSO": kpi_dso},
-        "calc_basis": {
-            "DSO": dso_pack
-        },
-        "kpi": {"DSO": kpi_dso},
+        "calc_basis": {"DSO": dso_pack},
 
-        # ✅ NUEVO: explícito y no ambiguo
         "aging_overdue": pack["aging_overdue"],
         "aging_current": pack["aging_current"],
 
         "current": float(pack["total_current"]),
         "por_vencer": float(pack["total_current"]),
 
-        # ✅ LEGACY: mantenido, pero SOLO vencido
         "aging": aging_legacy,
 
         "total_por_cobrar": float(pack["total_outstanding"]),
@@ -436,7 +455,6 @@ def build_context(win: PeriodWindow, ref_date: date) -> Dict[str, Any]:
         "sin_fecha_limite": float(pack["sin_fecha_limite"]),
         "open_invoices": int(pack["open_invoices"]),
 
-        # ✅ anti-confusión
         "aging_explain": {
             "ref_date": ref_date.isoformat(),
             "aging_overdue": "Montos VENCIDOS (ref_date > fecha_limite) por rangos de días vencidos.",
@@ -445,7 +463,6 @@ def build_context(win: PeriodWindow, ref_date: date) -> Dict[str, Any]:
         },
     }
 
-    # Validación (no bloqueante)
     try:
         validate_with(SCHEMA, data_norm)
     except Exception:
@@ -456,8 +473,6 @@ def build_context(win: PeriodWindow, ref_date: date) -> Dict[str, Any]:
         "ref_date": ref_date,
         "kpi_dso": kpi_dso,
         "data_norm": data_norm,
-
-        # también exponemos el pack por si alguna acción lo quiere directo
         "aging_pack": pack,
     }
 
@@ -497,11 +512,7 @@ def action_customer_balance(ctx: Dict[str, Any], params: Dict[str, Any]) -> Dict
         "summary": f"Saldo pendiente con el cliente '{cust}': {total:.2f}",
         "data": ctx["data_norm"],
         "dso": ctx["kpi_dso"],
-        "result": {
-            "action": "customer_balance",
-            "total_outstanding": total,
-            "table": table,
-        },
+        "result": {"action": "customer_balance", "total_outstanding": total, "table": table},
     }
 
 
@@ -559,12 +570,157 @@ def action_list_overdue(ctx: Dict[str, Any], params: Dict[str, Any]) -> Dict[str
     }
 
 
+def _parse_iso_dt(s: Any) -> Optional[datetime]:
+    """
+    Acepta:
+      - ISO 8601: 2025-10-29T23:59:59
+      - fecha simple: 2025-10-29
+      - LatAm: 29/10/2025 (dayfirst)
+    """
+    if not s:
+        return None
+    raw = str(s).strip()
+    if not raw:
+        return None
+
+    try:
+        return datetime.fromisoformat(raw)
+    except Exception:
+        pass
+
+    try:
+        return dateparser.parse(raw, dayfirst=True)
+    except Exception:
+        return None
+
+
+def action_cxc_due_between(ctx: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+    start = _parse_iso_dt(params.get("start"))
+    end = _parse_iso_dt(params.get("end"))
+    if not (start and end):
+        return {"error": "Faltan params 'start' y/o 'end' (ISO) para cxc_due_between"}
+
+    repo = FinanzasRepoDB()
+    summary = repo.cxc_due_between(start, end)
+
+    if "total" in summary and "saldo_total" not in summary:
+        summary["saldo_total"] = summary["total"]
+
+    if isinstance(summary.get("start"), str):
+        summary["start"] = summary["start"][:10]
+    if isinstance(summary.get("end"), str):
+        summary["end"] = summary["end"][:10]
+
+    return {
+        "summary": "Vencimientos CxC en rango (resumen)",
+        "data": ctx["data_norm"],
+        "dso": ctx["kpi_dso"],
+        "executive_context_patch": {"due_range_summary": summary},
+        "result": {"action": "cxc_due_between", "due_range_summary": summary},
+    }
+
+
+def action_cxc_top_clients_open(ctx: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+    as_of = _parse_iso_dt(params.get("as_of"))
+    if not as_of:
+        return {"error": "Falta param 'as_of' (ISO) para cxc_top_clients_open"}
+
+    limit = int(params.get("limit") or 5)
+
+    repo = FinanzasRepoDB()
+    summary = repo.cxc_top_clients_open(as_of, limit=limit)
+
+    if isinstance(summary.get("as_of"), str):
+        summary["as_of"] = summary["as_of"][:10]
+
+    return {
+        "summary": f"Top {limit} clientes por saldo CxC abierto",
+        "data": ctx["data_norm"],
+        "dso": ctx["kpi_dso"],
+        "executive_context_patch": {"top_clientes_cxc": summary},
+        "result": {"action": "cxc_top_clients_open", "top_clientes_cxc": summary},
+    }
+
+
+def action_cxc_invoices_due_on(ctx: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+    as_of = _parse_iso_dt(params.get("date") or params.get("as_of"))
+    if not as_of:
+        return {"error": "Falta param 'date' (ISO) para cxc_invoices_due_on"}
+
+    repo = FinanzasRepoDB()
+    summary = repo.cxc_invoices_due_on(as_of)
+
+    if isinstance(summary.get("date"), str):
+        summary["date"] = summary["date"][:10]
+
+    return {
+        "summary": "Facturas CxC que vencen en la fecha",
+        "data": ctx["data_norm"],
+        "dso": ctx["kpi_dso"],
+        "executive_context_patch": {"cxc_due_on": summary},
+        "result": {"action": "cxc_invoices_due_on", "cxc_due_on": summary},
+    }
+
+
+def action_cxc_partial_payments(ctx: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+    start = _parse_iso_dt(params.get("start"))
+    end = _parse_iso_dt(params.get("end"))
+    if not (start and end):
+        return {"error": "Faltan params 'start' y/o 'end' (ISO) para cxc_partial_payments"}
+
+    repo = FinanzasRepoDB()
+    summary = repo.cxc_partial_payments(start, end)
+
+    return {
+        "summary": "Facturas CxC con pago parcial",
+        "data": ctx["data_norm"],
+        "dso": ctx["kpi_dso"],
+        "executive_context_patch": {"cxc_pago_parcial": summary},
+        "result": {"action": "cxc_partial_payments", "cxc_pago_parcial": summary},
+    }
+
+
+def action_cxc_customer_open_balance_on(ctx: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    CXC-08: saldo abierto de un cliente al corte (as_of)
+    Espera:
+      - customer (string)
+      - as_of (ISO o dd/mm/yyyy)
+    """
+    customer = (params.get("customer") or "").strip()
+    if not customer:
+        return {"error": "Falta param 'customer' para cxc_customer_open_balance_on"}
+
+    as_of = _parse_iso_dt(params.get("as_of"))
+    if not as_of:
+        return {"error": "Falta param 'as_of' (ISO) para cxc_customer_open_balance_on"}
+
+    repo = FinanzasRepoDB()
+    summary = repo.cxc_customer_open_balance_on(customer, as_of)
+
+    if isinstance(summary.get("as_of"), str):
+        summary["as_of"] = summary["as_of"][:10]
+
+    return {
+        "summary": f"Saldo CxC abierto de '{customer}' al {summary.get('as_of')}: {summary.get('saldo')}",
+        "data": ctx["data_norm"],
+        "dso": ctx["kpi_dso"],
+        "executive_context_patch": {"cxc_saldo_cliente": summary},
+        "result": {"action": "cxc_customer_open_balance_on", "cxc_saldo_cliente": summary},
+    }
+
+
 ACTIONS = {
     "metrics": action_metrics,
     "top_overdue": action_top_overdue,
     "customer_balance": action_customer_balance,
     "list_open": action_list_open,
     "list_overdue": action_list_overdue,
+    "cxc_due_between": action_cxc_due_between,
+    "cxc_top_clients_open": action_cxc_top_clients_open,
+    "cxc_invoices_due_on": action_cxc_invoices_due_on,
+    "cxc_partial_payments": action_cxc_partial_payments,
+    "cxc_customer_open_balance_on": action_cxc_customer_open_balance_on,
 }
 
 
@@ -582,6 +738,33 @@ def run_action(
     """
     win = resolve_period(payload, state)
     ref_date = resolve_ref_date(win)
+
+    # ✅ Bridge rango router -> params para acciones que exigen start/end
+    if action in ("cxc_partial_payments", "cxc_due_between"):
+        if not params.get("start") or not params.get("end"):
+            params["start"] = win.start.to_pydatetime().isoformat()
+            params["end"] = win.end.to_pydatetime().isoformat()
+
+    # ✅ Bridge fecha de corte para CXC-04 (top clientes):
+    # Si no viene as_of, lo inferimos del ref_date ("fecha:YYYY-MM-DD") y usamos fin de día.
+    if action == "cxc_top_clients_open":
+        if not params.get("as_of"):
+            params["as_of"] = datetime(ref_date.year, ref_date.month, ref_date.day, 23, 59, 59).isoformat()
+        if not params.get("limit"):
+            params["limit"] = 5
+        # ✅ FIX: bridge as_of si viene periodo tipo fecha:YYYY-MM-DD pero router no manda params
+    if action == "cxc_customer_open_balance_on":
+        if not params.get("as_of"):
+            params["as_of"] = datetime(ref_date.year, ref_date.month, ref_date.day, 23, 59, 59).isoformat()
+
+        # ✅ BRIDGE CUSTOMER desde la pregunta si no viene en params
+        if not params.get("customer"):
+            q = payload.get("question") or ""
+            extracted = _extract_customer_from_question(q)
+            if extracted:
+                params["customer"] = extracted
+
+
     ctx = build_context(win, ref_date)
 
     if isinstance(ctx, dict) and ctx.get("error"):

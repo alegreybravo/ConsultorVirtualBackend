@@ -1,7 +1,8 @@
 # app/repo_finanzas_db.py
 from datetime import datetime, timedelta
 from decimal import Decimal
-from sqlalchemy import func
+
+from sqlalchemy import func, or_
 
 from .database import SessionLocal
 from app.models import FacturaCXC, FacturaCXP, Entidad
@@ -50,7 +51,7 @@ class FinanzasRepoDB:
         s = Decimal("0")
         q = db.query(FacturaCXC).filter(
             FacturaCXC.fecha_emision >= start,
-            FacturaCXC.fecha_emision < end
+            FacturaCXC.fecha_emision < end,
         )
         for f in q:
             s += Decimal(f.monto or 0)
@@ -60,7 +61,7 @@ class FinanzasRepoDB:
         p = Decimal("0")
         q = db.query(FacturaCXP).filter(
             FacturaCXP.fecha_emision >= start,
-            FacturaCXP.fecha_emision < end
+            FacturaCXP.fecha_emision < end,
         )
         for f in q:
             p += Decimal(f.monto or 0)
@@ -94,11 +95,11 @@ class FinanzasRepoDB:
         month: int,
         window_days: int = 90,
         min_denominator: Decimal = Decimal("1"),          # compat (si alguien lo usa)
-        min_abs_denom: Decimal = Decimal("10000"),        # ✅ nuevo: umbral absoluto
-        min_ratio: Decimal = Decimal("0.10"),             # ✅ nuevo: umbral relativo vs AR_end
+        min_abs_denom: Decimal = Decimal("10000"),        # ✅ umbral absoluto
+        min_ratio: Decimal = Decimal("0.10"),             # ✅ umbral relativo vs AR_end
     ) -> dict:
         """
-        1) Intenta DSO mensual si ventas del mes son suficientes (no solo >0).
+        1) Intenta DSO mensual si ventas del mes son suficientes.
         2) Si ventas del mes son 0 o "muy pequeñas", fallback a trailing window_days (default 90d).
 
         Retorna dict:
@@ -170,8 +171,8 @@ class FinanzasRepoDB:
         month: int,
         window_days: int = 90,
         min_denominator: Decimal = Decimal("1"),          # compat
-        min_abs_denom: Decimal = Decimal("10000"),        # ✅ nuevo: umbral absoluto
-        min_ratio: Decimal = Decimal("0.10"),             # ✅ nuevo: umbral relativo vs AP_end
+        min_abs_denom: Decimal = Decimal("10000"),        # ✅ umbral absoluto
+        min_ratio: Decimal = Decimal("0.10"),             # ✅ umbral relativo vs AP_end
     ) -> dict:
         """
         Igual que DSO pero para compras.
@@ -243,9 +244,9 @@ class FinanzasRepoDB:
         Cuenta facturas CxC cuyo vencimiento (fecha_limite) cae dentro de [start, end]
         y calcula el saldo pendiente total.
         """
-        if start.tzinfo:
+        if start and start.tzinfo:
             start = start.replace(tzinfo=None)
-        if end.tzinfo:
+        if end and end.tzinfo:
             end = end.replace(tzinfo=None)
 
         db = SessionLocal()
@@ -289,7 +290,7 @@ class FinanzasRepoDB:
           - saldo actual (monto - coalesce(monto_pagado,0))
         Agrupa por id_entidad_cliente y devuelve nombre desde tabla entidad.
         """
-        if as_of.tzinfo:
+        if as_of and as_of.tzinfo:
             as_of = as_of.replace(tzinfo=None)
 
         limit = int(limit or 5)
@@ -339,30 +340,13 @@ class FinanzasRepoDB:
         finally:
             db.close()
 
-    # ---------- ✅ CXC-06: Facturas CxC que vencen en una fecha (lista + saldos) ----------
+    # ---------- CXC-06: Facturas CxC que vencen en una fecha (lista + saldos) ----------
     def cxc_invoices_due_on(self, day: datetime) -> dict:
         """
         Lista facturas CxC cuyo vencimiento (fecha_limite) cae en el día indicado (00:00:00 - 23:59:59),
         con su saldo pendiente y el nombre del cliente (Entidad).
-
-        Devuelve:
-          {
-            "date": "YYYY-MM-DD",
-            "count": int,
-            "total": float,
-            "rows": [
-              {
-                "id_cxc": int,
-                "id_entidad_cliente": int,
-                "cliente_nombre": str,
-                "fecha_limite": "YYYY-MM-DD",
-                "saldo_total": float
-              }, ...
-            ],
-            "source": "db"
-          }
         """
-        if day.tzinfo:
+        if day and day.tzinfo:
             day = day.replace(tzinfo=None)
 
         day_start = datetime(day.year, day.month, day.day, 0, 0, 0)
@@ -370,7 +354,10 @@ class FinanzasRepoDB:
 
         db = SessionLocal()
         try:
-            saldo_expr = func.greatest(FacturaCXC.monto - func.coalesce(FacturaCXC.monto_pagado, 0), 0).label("saldo_total")
+            saldo_expr = func.greatest(
+                FacturaCXC.monto - func.coalesce(FacturaCXC.monto_pagado, 0),
+                0
+            ).label("saldo_total")
             nombre_expr = func.coalesce(Entidad.nombre_comercial, Entidad.nombre_legal).label("cliente_nombre")
 
             q = (
@@ -400,7 +387,11 @@ class FinanzasRepoDB:
                     "id_cxc": int(id_cxc or 0),
                     "id_entidad_cliente": int(cid or 0),
                     "cliente_nombre": str(nombre or "").strip() or f"Cliente #{int(cid or 0)}",
-                    "fecha_limite": (fecha_limite.date().isoformat() if isinstance(fecha_limite, datetime) else str(fecha_limite)[:10]),
+                    "fecha_limite": (
+                        fecha_limite.date().isoformat()
+                        if isinstance(fecha_limite, datetime)
+                        else str(fecha_limite)[:10]
+                    ),
                     "saldo_total": float(st),
                 })
 
@@ -414,12 +405,17 @@ class FinanzasRepoDB:
         finally:
             db.close()
 
-
+    # ---------- CXC-07: Facturas CxC con pago parcial ----------
     def cxc_partial_payments(self, start: datetime, end: datetime) -> dict:
         """
         Facturas CxC con pago parcial:
         monto_pagado > 0 AND saldo > 0
         """
+        if start and start.tzinfo:
+            start = start.replace(tzinfo=None)
+        if end and end.tzinfo:
+            end = end.replace(tzinfo=None)
+
         db = SessionLocal()
         try:
             saldo_expr = func.greatest(
@@ -457,13 +453,14 @@ class FinanzasRepoDB:
                 "total_saldo_pendiente": float(total_saldo),
                 "rows": [
                     {
-                        "id_cxc": r.id_cxc,
-                        "cliente": r.nombre_comercial,
-                        "monto_original": float(r.monto),
-                        "monto_pagado": float(r.monto_pagado),
-                        "saldo_pendiente": float(r.saldo_pendiente),
-                        "fecha_emision": r.fecha_emision.date().isoformat(),
-                        "fecha_limite": r.fecha_limite.date().isoformat(),
+                        "id_cxc": int(r.id_cxc or 0),
+                        "id_entidad_cliente": int(r.id_entidad_cliente or 0),
+                        "cliente": (r.nombre_comercial or "").strip(),
+                        "monto_original": float(r.monto or 0),
+                        "monto_pagado": float(r.monto_pagado or 0),
+                        "saldo_pendiente": float(r.saldo_pendiente or 0),
+                        "fecha_emision": r.fecha_emision.date().isoformat() if r.fecha_emision else None,
+                        "fecha_limite": r.fecha_limite.date().isoformat() if r.fecha_limite else None,
                     }
                     for r in rows
                 ],
@@ -472,3 +469,101 @@ class FinanzasRepoDB:
         finally:
             db.close()
 
+    # ---------- ✅ CXC-08: Saldo abierto CxC de un cliente al corte (as_of) ----------
+    def cxc_customer_open_balance_on(self, customer_name: str, as_of: datetime) -> dict:
+        """
+        CXC-08: Saldo abierto CxC de un cliente al corte (as_of).
+        - Usa facturas emitidas <= as_of (corte) y pagada = False
+        - saldo = greatest(monto - coalesce(monto_pagado, 0), 0)
+        - match robusto por Entidad.nombre_legal / nombre_comercial (case-insensitive + sin tildes)
+        """
+        if not customer_name:
+            return {"error": "customer_name requerido", "source": "db"}
+
+        if as_of and as_of.tzinfo:
+            as_of = as_of.replace(tzinfo=None)
+
+        name_raw = str(customer_name).strip()
+        if not name_raw:
+            return {"error": "customer_name vacío", "source": "db"}
+
+        db = SessionLocal()
+        try:
+            saldo_expr = func.greatest(
+                FacturaCXC.monto - func.coalesce(FacturaCXC.monto_pagado, 0),
+                0
+            )
+
+            # ---- Resolver Entidad (robusto) ----
+            cust_id = None
+            cust = None
+
+            # Si viene un id numérico, usarlo directo
+            try:
+                cust_id = int(name_raw)
+            except Exception:
+                cust_id = None
+
+            if cust_id is None:
+                # Match sin tildes: unaccent(lower(campo)) LIKE %unaccent(lower(input))%
+                needle = func.unaccent(func.lower(name_raw))
+                legal = func.unaccent(func.lower(Entidad.nombre_legal))
+                comercial = func.unaccent(func.lower(Entidad.nombre_comercial))
+
+                cust = (
+                    db.query(Entidad)
+                    .filter(
+                        or_(
+                            legal.like(func.concat('%', needle, '%')),
+                            comercial.like(func.concat('%', needle, '%')),
+                        )
+                    )
+                    .order_by(Entidad.id_entidad.asc())
+                    .first()
+                )
+                cust_id = cust.id_entidad if cust else None
+            else:
+                cust = db.query(Entidad).filter(Entidad.id_entidad == cust_id).first()
+
+            if not cust_id:
+                return {
+                    "as_of": as_of.isoformat(),
+                    "customer": name_raw,
+                    "id_entidad": 0,
+                    "saldo": 0.0,
+                    "count_facturas": 0,
+                    "source": "db",
+                    "warning": "Cliente no encontrado (match por nombre/id falló).",
+                }
+
+            customer_display = (cust.nombre_legal or cust.nombre_comercial or name_raw) if cust else name_raw
+
+            # ---- Query saldo por id_entidad_cliente ----
+            row = (
+                db.query(
+                    func.sum(saldo_expr).label("saldo"),
+                    func.count(FacturaCXC.id_cxc).label("count_facturas"),
+                )
+                .filter(
+                    FacturaCXC.pagada == False,
+                    FacturaCXC.id_entidad_cliente == cust_id,
+                    FacturaCXC.fecha_emision <= as_of,
+                    saldo_expr > 0,
+                )
+                .first()
+            )
+
+            saldo_total = float((row.saldo or 0) if row else 0)
+            count_facturas = int((row.count_facturas or 0) if row else 0)
+
+            return {
+                "as_of": as_of.isoformat(),
+                "customer": str(customer_display),
+                "id_entidad": int(cust_id or 0),
+                "saldo": saldo_total,
+                "count_facturas": count_facturas,
+                "source": "db",
+            }
+        finally:
+            db.close()
+    

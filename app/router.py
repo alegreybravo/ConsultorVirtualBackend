@@ -34,6 +34,8 @@ def _coerce_sidebar_period(period_str: Optional[str]) -> Optional[dict]:
             "start": start.isoformat(),
             "end": end.isoformat(),
             "granularity": "month",
+            "source": "sidebar",
+            "tz": str(TZ),
         }
     return None
 
@@ -89,9 +91,22 @@ class Router:
         payload = task.get("payload", {}) or {}
         question = payload.get("question", "") or ""
 
-        # 1) Resolver período híbrido (param > NLP > default)
+        # ✅ 0) Traer meta desde graph (CRÍTICO para aaav_cxc)
+        meta_in: Dict[str, Any] = payload.get("_meta") or {}
+
+        # ✅ 1) Resolver período híbrido:
+        #    prioridad: period_override (graph) > sidebar (UI) > NLP/default
+        period_override = payload.get("period_override")
+        if not isinstance(period_override, dict) or not period_override:
+            # fallback: si meta trae date_range, úsalo como override
+            dr = (meta_in.get("date_range") or {})
+            if isinstance(dr, dict) and dr.get("start") and dr.get("end"):
+                period_override = dr
+
         sidebar_period_str = payload.get("period") or getattr(state, "period_raw", None)
-        override = _coerce_sidebar_period(sidebar_period_str)
+        sidebar_override = _coerce_sidebar_period(sidebar_period_str)
+
+        override = period_override or sidebar_override
         pr = resolve_period(question, override)  # devuelve datetimes (aware) TZ CR
 
         period = {
@@ -120,6 +135,8 @@ class Router:
                 "intent_decision": intent_pack,
                 "question": question,
                 "period": period,
+                # ✅ para depurar: confirmar que meta viajó hasta aquí
+                "_meta_in": meta_in,
             }
         )
 
@@ -151,6 +168,19 @@ class Router:
                 "_meta": {"period_resolved": period, "router_sequence": []},
             }
 
+        # ✅ payload base para agentes: aquí viaja _meta, action, params
+        # (aaav_cxc lo necesita para auto-params start/end por date_range)
+        base_agent_payload = {
+            "question": question,
+            "period_range": period,
+            "_meta": meta_in,
+        }
+        # si el graph/UI fuerza action/params, no lo pierdas
+        if payload.get("action"):
+            base_agent_payload["action"] = payload.get("action")
+        if payload.get("params"):
+            base_agent_payload["params"] = payload.get("params")
+
         # 5) Ejecutar subagentes en orden (CxC/CxP primero; Contable después con insumos)
         trace: List[Dict[str, Any]] = []
         cxc_blob: Optional[Dict[str, Any]] = None
@@ -159,10 +189,9 @@ class Router:
         for agent_name in [a for a in agent_sequence if a != "aav_contable"]:
             agent = get_agent(agent_name)
             try:
-                # IMPORTANTE: pasar period_range (el dict unificado)
-                result = agent.handle({"payload": {"question": question, "period_range": period}}, state)
+                result = agent.handle({"payload": dict(base_agent_payload)}, state)
             except TypeError:
-                result = agent.handle({"payload": {"period_range": period}}, state)
+                result = agent.handle({"payload": {"period_range": period, "_meta": meta_in}}, state)
 
             result = result or {}
             result["agent"] = agent_name
@@ -180,9 +209,10 @@ class Router:
             contable = get_agent("aav_contable")
             cont_payload = {
                 "payload": {
-                    "period_range": period,  # mantiene formato dict/tz
-                    "cxc_data": cxc_blob,  # puede ir None; el agente lo maneja
+                    "period_range": period,
+                    "cxc_data": cxc_blob,
                     "cxp_data": cxp_blob,
+                    "_meta": meta_in,
                 }
             }
             cont_res = contable.handle(cont_payload, state) or {}
@@ -192,16 +222,15 @@ class Router:
         # 7) Gerente al final (consolidación ejecutiva)
         gerente = get_agent("av_gerente")
         final_report = gerente.handle(
-            {"payload": {"trace": trace, "question": question, "period": period}},
+            {"payload": {"trace": trace, "question": question, "period": period, "_meta": meta_in}},
             state,
         ) or {}
 
-        # 8) ✅ Normalización de salida para la UI (SIN recortar llaves)
+        # 8) Normalización de salida para la UI (SIN recortar llaves)
         exec_pack = final_report.get("executive_decision_bsc")
         if not isinstance(exec_pack, dict):
             exec_pack = final_report if isinstance(final_report, dict) else {}
 
-        # Defaults mínimos (pero conservando TODO lo demás: executive_context, applied_rules, causalidad, etc.)
         exec_pack.setdefault("resumen_ejecutivo", "Consolidado generado.")
         exec_pack.setdefault("hallazgos", [])
         exec_pack.setdefault("riesgos", [])
@@ -211,13 +240,9 @@ class Router:
             {"finanzas": [], "clientes": [], "procesos_internos": [], "aprendizaje_crecimiento": []},
         )
 
-        # ✅ ESTE es el pack completo que se manda
         executive = exec_pack
-
-        # Derivar KPIs para las cards (contable primero, luego mirrors CxC/CxP)
         derived_metrics = _derive_metrics_from_trace(trace)
 
-        # 8.1) ✅ Orders robustas (prioridad: ordenes_prioritarias -> orders)
         orders_src = executive.get("ordenes_prioritarias") or executive.get("orders") or []
 
         ui_result = {

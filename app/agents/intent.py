@@ -92,6 +92,9 @@ class Intent(BaseModel):
     # CXC-07
     cxc_pago_parcial: bool = Field(False)
 
+    # ✅ CXC-08
+    saldo_cliente_cxc: bool = Field(False)
+
     reason: str = Field("")
 
 
@@ -197,6 +200,22 @@ def route_intent(question: str) -> Intent:
         vencimientos_rango = False
         aging = False
 
+    # -------------------------
+    # CXC-08: saldo abierto de un cliente a una fecha
+    # Ej: "¿Cuál es el saldo abierto de Panadería La Espiga S.A. al 29/10/2025?"
+    # -------------------------
+    saldo_kw = any(k in q_low for k in ["saldo", "saldos"])
+    al_corte_kw = any(k in q_low for k in [" al ", " a ", " corte", " a fecha", " a la fecha"])
+    cliente_kw = any(k in q_low for k in ["cliente", "clientes", "de "])  # "saldo de X"
+    abierto_kw = any(k in q_low for k in ["abierto", "pendiente", "por cobrar", "cxc", "cuentas por cobrar"])
+
+    saldo_cliente_cxc = bool(
+        saldo_kw
+        and abierto_kw
+        and _has_any_date(q_low)
+        and not _has_two_dates(q_low)          # no es rango
+        and not top_clientes_cxc              # no es ranking
+    )
 
     # -------------------------
     # Ajustes / fuerzas de módulo
@@ -215,11 +234,13 @@ def route_intent(question: str) -> Intent:
 
     if cxc_pago_parcial:
         cxc = True
+    if saldo_cliente_cxc:
+        cxc = True
 
     # -------------------------
     # Si ya hay señales claras -> NO LLM
     # -------------------------
-    if cxc or cxp or informe or aging or vencimientos_rango or top_clientes_cxc or vencen_hoy_cxc or cxc_pago_parcial:
+    if cxc or cxp or informe or aging or vencimientos_rango or top_clientes_cxc or vencen_hoy_cxc or cxc_pago_parcial or saldo_cliente_cxc:
         return Intent(
             cxc=cxc,
             cxp=cxp,
@@ -229,6 +250,7 @@ def route_intent(question: str) -> Intent:
             top_clientes_cxc=top_clientes_cxc,
             vencen_hoy_cxc=vencen_hoy_cxc,
             cxc_pago_parcial=cxc_pago_parcial,
+            saldo_cliente_cxc=saldo_cliente_cxc,
             reason="Heurística por palabras clave",
         )
 
@@ -248,10 +270,13 @@ def route_intent(question: str) -> Intent:
 - top_clientes_cxc = true si pide ranking/top de clientes por saldo CxC abierto a una fecha.
 - vencen_hoy_cxc = true si pide facturas CxC que vencen hoy o en una fecha específica (1 fecha).
 - cxc_pago_parcial = true si pide facturas CxC con pago parcial (monto_pagado > 0 y saldo > 0).
+- saldo_cliente_cxc = true si pide el saldo abierto de un cliente específico a una fecha (no ranking).
+
+
 
 Si la pregunta es ambigua, activa cxc=true y cxp=true.
 RESPONDE SOLO un JSON con EXACTAMENTE estas llaves:
-cxc, cxp, informe, aging, vencimientos_rango, top_clientes_cxc, vencen_hoy_cxc, cxc_pago_parcial, reason.
+cxc, cxp, informe, aging, vencimientos_rango, top_clientes_cxc, vencen_hoy_cxc, cxc_pago_parcial, saldo_cliente_cxc, reason.
 No agregues campos adicionales ni texto extra.
 """
         ),
@@ -276,6 +301,7 @@ Devuelve SOLO el JSON final (sin comentarios, sin texto extra)."""
         top_clientes_cxc = _coerce_bool(obj.get("top_clientes_cxc"))
         vencen_hoy_cxc = _coerce_bool(obj.get("vencen_hoy_cxc"))
         cxc_pago_parcial = _coerce_bool(obj.get("cxc_pago_parcial"))
+        saldo_cliente_cxc = _coerce_bool(obj.get("saldo_cliente_cxc"))
         reason = str(obj.get("reason") or "").strip()
 
         # Fallback mínimo si el LLM no devolvió nada útil
@@ -297,6 +323,7 @@ Devuelve SOLO el JSON final (sin comentarios, sin texto extra)."""
             top_clientes_cxc=top_clientes_cxc,
             vencen_hoy_cxc=vencen_hoy_cxc,
             cxc_pago_parcial=cxc_pago_parcial,
+            saldo_cliente_cxc=saldo_cliente_cxc,
             reason=reason,
         )
 

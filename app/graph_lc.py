@@ -8,31 +8,17 @@ from zoneinfo import ZoneInfo
 
 from app.state import GlobalState
 from app.router import Router
-from app.utils.knowledge_base import (
-    get_applicable_rules,
-    get_agent_kb,   # por si luego quieres usar pathways/concepts
-)
+from app.utils.knowledge_base import get_applicable_rules
 from app.agents.intent import route_intent
-from app.repo_finanzas_db import FinanzasRepoDB
 from app.utils.executive_summary import generate_executive_summary
 
 TZ = ZoneInfo("America/Costa_Rica")
 
-# --- Regex para extraer 2 fechas del texto ---
 _RX_DATE_DMY = re.compile(r"\b(\d{1,2})/(\d{1,2})/(\d{2,4})\b")    # 29/10/2025
 _RX_DATE_ISO = re.compile(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b")      # 2025-10-29
 
 
 def _extract_two_dates(question: str) -> tuple[Optional[datetime], Optional[datetime]]:
-    """
-    Extrae dos fechas explícitas del texto.
-    Devuelve (start_dt, end_dt) en TZ America/Costa_Rica, con:
-      start: 00:00:00
-      end:   23:59:59
-    Acepta:
-      - 29/10/2025 ... 05/11/2025
-      - 2025-10-29 ... 2025-11-05
-    """
     text = question or ""
 
     dmy = _RX_DATE_DMY.findall(text)
@@ -52,16 +38,7 @@ def _extract_two_dates(question: str) -> tuple[Optional[datetime], Optional[date
     return None, None
 
 
-# --------------------------------------------------------------------
-# ✅ CXC-06: Extraer UNA fecha (para "vencen hoy (29/10/2025)")
-# --------------------------------------------------------------------
 def _extract_one_date(question: str) -> Optional[datetime]:
-    """
-    Extrae una fecha explícita del texto y retorna datetime en TZ con corte 23:59:59.
-    Acepta:
-      - 29/10/2025
-      - 2025-10-29
-    """
     text = question or ""
 
     m = _RX_DATE_DMY.search(text)
@@ -83,13 +60,7 @@ def _extract_one_date(question: str) -> Optional[datetime]:
     return None
 
 
-# --------------------------------------------------------------------
-# Clasificador de modo de datos: "db" vs "advisory"
-# --------------------------------------------------------------------
-def _classify_data_mode(
-    metrics: Dict[str, Any],
-    trace: List[Dict[str, Any]],
-) -> str:
+def _classify_data_mode(metrics: Dict[str, Any], trace: List[Dict[str, Any]]) -> str:
     metrics = metrics or {}
     trace = trace or []
 
@@ -170,174 +141,24 @@ def _build_metrics_cxp(result: Dict[str, Any]) -> Dict[str, float]:
     }
 
 
-def _attach_due_range_summary(result: Dict[str, Any]) -> None:
+def _merge_executive_context_patches(result: Dict[str, Any]) -> None:
     """
-    CXC-03: Adjunta un resumen de vencimientos en rango a:
-      gerente.executive_decision_bsc.executive_context.due_range_summary
-
-    Usa:
-      result["_meta"]["intent"]["vencimientos_rango"] = True
-      result["_meta"]["date_range"] = {start,end,...} (ISO strings)
+    Busca en trace items que traigan executive_context_patch y los mergea en:
+      result["gerente"]["executive_decision_bsc"]["executive_context"]
     """
-    meta = result.get("_meta") or {}
-    intent = meta.get("intent") or {}
-    dr = meta.get("date_range") or {}
+    trace = result.get("trace") or []
+    gerente = result.setdefault("gerente", {})
+    exec_pack = gerente.setdefault("executive_decision_bsc", {})
+    exec_ctx = exec_pack.setdefault("executive_context", {})
 
-    if not (intent.get("vencimientos_rango") is True and dr.get("start") and dr.get("end")):
-        return
+    for tr in trace:
+        if not isinstance(tr, dict):
+            continue
+        patch = tr.get("executive_context_patch")
+        if isinstance(patch, dict) and patch:
+            exec_ctx.update(patch)
 
-    try:
-        start = datetime.fromisoformat(dr["start"])
-        end = datetime.fromisoformat(dr["end"])
-    except Exception:
-        return
-
-    repo = FinanzasRepoDB()
-    summary = repo.cxc_due_between(start, end)
-
-    if "total" in summary and "saldo_total" not in summary:
-        summary["saldo_total"] = summary["total"]
-
-    if isinstance(summary.get("start"), str) and len(summary["start"]) >= 10:
-        summary["start"] = summary["start"][:10]
-    if isinstance(summary.get("end"), str) and len(summary["end"]) >= 10:
-        summary["end"] = summary["end"][:10]
-
-    gerente = result.get("gerente") or {}
-    exec_pack = gerente.get("executive_decision_bsc") or {}
-    ctx = exec_pack.get("executive_context") or {}
-    ctx["due_range_summary"] = summary
-    exec_pack["executive_context"] = ctx
-    gerente["executive_decision_bsc"] = exec_pack
-    result["gerente"] = gerente
-
-
-# --------------------------------------------------------------------
-# ✅ CXC-04: Top 5 clientes por saldo CxC abierto al corte
-# --------------------------------------------------------------------
-def _attach_top_clientes_cxc(result: Dict[str, Any], question: str) -> None:
-    meta = result.get("_meta") or {}
-    intent = meta.get("intent") or {}
-    if intent.get("top_clientes_cxc") is not True:
-        return
-
-    as_of: Optional[datetime] = None
-
-    pr = meta.get("period_resolved") or {}
-    txt = str(pr.get("text") or "")
-    if "fecha:" in txt:
-        try:
-            date_str = txt.split("fecha:")[-1].strip()
-            as_of = datetime.fromisoformat(f"{date_str}T23:59:59").replace(tzinfo=TZ)
-        except Exception:
-            as_of = None
-
-    if as_of is None:
-        m = _RX_DATE_ISO.search(question or "")
-        if m:
-            try:
-                y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
-                as_of = datetime(y, mo, d, 23, 59, 59, tzinfo=TZ)
-            except Exception:
-                as_of = None
-
-    if as_of is None:
-        return
-
-    repo = FinanzasRepoDB()
-    summary = repo.cxc_top_clients_open(as_of, limit=5)
-
-    if isinstance(summary.get("as_of"), str) and len(summary["as_of"]) >= 10:
-        summary["as_of"] = summary["as_of"][:10]
-
-    gerente = result.get("gerente") or {}
-    exec_pack = gerente.get("executive_decision_bsc") or {}
-    ctx = exec_pack.get("executive_context") or {}
-
-    ctx["top_clientes_cxc"] = summary
-    exec_pack["executive_context"] = ctx
-    gerente["executive_decision_bsc"] = exec_pack
-    result["gerente"] = gerente
-
-
-# --------------------------------------------------------------------
-# ✅ CXC-06: Facturas CxC que vencen en una fecha (hoy = fecha indicada)
-# --------------------------------------------------------------------
-def _attach_cxc_due_on(result: Dict[str, Any]) -> None:
-    """
-    Adjunta en:
-      gerente.executive_decision_bsc.executive_context.cxc_due_on
-
-    Requiere:
-      result["_meta"]["intent"]["vencen_hoy_cxc"] = True
-      result["_meta"]["due_on"]["date"] = ISO string
-    """
-    meta = result.get("_meta") or {}
-    intent = meta.get("intent") or {}
-    due_on = meta.get("due_on") or {}
-
-    if intent.get("vencen_hoy_cxc") is not True:
-        return
-    if not due_on.get("date"):
-        return
-
-    try:
-        as_of = datetime.fromisoformat(due_on["date"])
-    except Exception:
-        return
-
-    repo = FinanzasRepoDB()
-    summary = repo.cxc_invoices_due_on(as_of)
-
-    if isinstance(summary.get("date"), str) and len(summary["date"]) >= 10:
-        summary["date"] = summary["date"][:10]
-
-    gerente = result.get("gerente") or {}
-    exec_pack = gerente.get("executive_decision_bsc") or {}
-    ctx = exec_pack.get("executive_context") or {}
-
-    ctx["cxc_due_on"] = summary
-    exec_pack["executive_context"] = ctx
-    gerente["executive_decision_bsc"] = exec_pack
-    result["gerente"] = gerente
-
-
-# --------------------------------------------------------------------
-# ✅ CXC-07: Facturas CxC con pago parcial
-# --------------------------------------------------------------------
-def _attach_cxc_partial_payments(result: Dict[str, Any]) -> None:
-    meta = result.get("_meta") or {}
-    intent = meta.get("intent") or {}
-
-    # ✅ Fix: key correcta + compatibilidad
-    if not (intent.get("cxc_pago_parcial") is True or intent.get("pago_parcial_cxc") is True):
-        return
-
-    # ✅ Fix: preferir rango explícito del usuario (date_range) si existe
-    dr = meta.get("date_range") or {}
-    pr = meta.get("period_resolved") or {}
-
-    start_s = dr.get("start") or pr.get("start")
-    end_s = dr.get("end") or pr.get("end")
-    if not start_s or not end_s:
-        return
-
-    try:
-        start = datetime.fromisoformat(start_s)
-        end = datetime.fromisoformat(end_s)
-    except Exception:
-        return
-
-    repo = FinanzasRepoDB()
-    summary = repo.cxc_partial_payments(start, end)
-
-    gerente = result.get("gerente") or {}
-    exec_pack = gerente.get("executive_decision_bsc") or {}
-    ctx = exec_pack.get("executive_context") or {}
-
-    ctx["cxc_pago_parcial"] = summary
-
-    exec_pack["executive_context"] = ctx
+    exec_pack["executive_context"] = exec_ctx
     gerente["executive_decision_bsc"] = exec_pack
     result["gerente"] = gerente
 
@@ -353,13 +174,13 @@ def run_query(
 
     intent = None
     date_range_meta = None
-    due_on_meta = None  # ✅ CXC-06
+    due_on_meta = None
+    as_of_meta = None  # ✅ SIEMPRE local por request
 
     try:
         intent = route_intent(question)
 
-        # ✅ CXC-03 (extrae 2 fechas si existen)
-        # ✅ Extraer 2 fechas explícitas si el intent lo requiere (CXC-03 o CXC-07)
+        # rango para CXC-03 o CXC-07
         if getattr(intent, "vencimientos_rango", False) or getattr(intent, "cxc_pago_parcial", False):
             start_dt, end_dt = _extract_two_dates(question)
             if start_dt and end_dt:
@@ -372,11 +193,9 @@ def run_query(
                     "tz": str(TZ),
                 }
 
-
-        # ✅ CXC-06: vencen hoy (con fecha explícita)
+        # fecha única para CXC-06
         if getattr(intent, "vencen_hoy_cxc", False):
             one = _extract_one_date(question)
-
             if one is None and re.search(r"\b(hoy|para hoy|del día)\b", (question or "").lower()):
                 now = datetime.now(TZ)
                 one = datetime(now.year, now.month, now.day, 23, 59, 59, tzinfo=TZ)
@@ -389,14 +208,39 @@ def run_query(
                     "tz": str(TZ),
                 }
 
+        # ✅ fecha única para CXC-04 (top clientes) y CXC-08 (saldo cliente al corte)
+        if getattr(intent, "top_clientes_cxc", False) or getattr(intent, "saldo_cliente_cxc", False):
+            one = _extract_one_date(question)
+            if one is None and re.search(r"\b(hoy|para hoy|del día)\b", (question or "").lower()):
+                now = datetime.now(TZ)
+                one = datetime(now.year, now.month, now.day, 23, 59, 59, tzinfo=TZ)
+
+            if one:
+                as_of_meta = {
+                    "text": "fecha_pregunta",
+                    "as_of": one.isoformat(),
+                    "source": "question",
+                    "tz": str(TZ),
+                }
+
     except Exception:
         intent = None
         date_range_meta = None
         due_on_meta = None
+        as_of_meta = None
 
+    # -------------------------
+    # ✅ payload con _meta ANTES del dispatch
+    # -------------------------
     payload: Dict[str, Any] = {"question": question, "period": period}
+    payload["_meta"] = {
+        "intent": intent.model_dump() if intent is not None else {},
+        "date_range": date_range_meta,
+        "due_on": due_on_meta,
+        "as_of": as_of_meta,
+    }
 
-    # ✅ Fix: si hay rango y el intent es CXC-03 o CXC-07, pasar period_override
+    # (si tu router usa period_override, lo mantenemos)
     if date_range_meta and intent is not None and (
         getattr(intent, "vencimientos_rango", False) or getattr(intent, "cxc_pago_parcial", False)
     ):
@@ -405,25 +249,18 @@ def run_query(
     router = Router()
     result = router.dispatch({"payload": payload}, state)
 
+    # -------------------------
+    # _meta final en result
+    # -------------------------
     meta = result.get("_meta") or {}
     if intent is not None:
         meta["intent"] = intent.model_dump()
         if date_range_meta:
             meta["date_range"] = date_range_meta
         if due_on_meta:
-            meta["due_on"] = due_on_meta  # ✅ CXC-06
-    else:
-        meta["intent"] = {
-            "cxc": True,
-            "cxp": True,
-            "informe": False,
-            "aging": False,
-            "vencimientos_rango": False,
-            "top_clientes_cxc": False,
-            "vencen_hoy_cxc": False,
-            "cxc_pago_parcial": False,  # ✅ Fix: consistencia
-            "reason": "intent error",
-        }
+            meta["due_on"] = due_on_meta
+        if as_of_meta:
+            meta["as_of"] = as_of_meta
     result["_meta"] = meta
 
     metrics_global = _build_metrics_global(result)
@@ -440,6 +277,7 @@ def run_query(
         "aaav_cxp": get_applicable_rules("aaav_cxp", metrics=metrics_cxp, text_query=question),
         "av_finanzas": get_applicable_rules("av_finanzas", metrics=metrics_global, text_query=question),
         "av_contador_financiero": get_applicable_rules("av_contador_financiero", metrics=metrics_global, text_query=question),
+        "aav_contador_financiero": get_applicable_rules("aav_contador_financiero", metrics=metrics_global, text_query=question),
         "aav_contador": get_applicable_rules("aav_contador", metrics=metrics_global, text_query=question),
     }
 
@@ -448,18 +286,14 @@ def run_query(
     meta["data_mode"] = data_mode
     result["_meta"] = meta
 
-    _attach_due_range_summary(result)
-    _attach_top_clientes_cxc(result, question=question)
+    # -------------------------
+    # ✅ merge genérico de patches
+    # -------------------------
+    _merge_executive_context_patches(result)
 
-    # ✅ CXC-06
-    _attach_cxc_due_on(result)
-
-    # ✅ CXC-07
-    _attach_cxc_partial_payments(result)
-
-    # ---------------------------------------------------------
-    # ✅ POST: Resumen ejecutivo consistente con contexto operativo
-    # ---------------------------------------------------------
+    # -------------------------
+    # resumen ejecutivo
+    # -------------------------
     try:
         exec_pack = (result.get("gerente") or {}).get("executive_decision_bsc") or {}
         exec_ctx = exec_pack.get("executive_context") or {}

@@ -7,11 +7,14 @@ import json
 from app.lc_llm import get_chat_model
 
 
-def _safe_json(obj: Any) -> str:
+def _safe_json_or_str(obj: Any) -> str:
     try:
         return json.dumps(obj, ensure_ascii=False, indent=2, default=str)
     except Exception:
-        return "{}"
+        try:
+            return str(obj)
+        except Exception:
+            return "{}"
 
 
 def _coerce_bool(v: Any) -> bool:
@@ -30,6 +33,11 @@ def _money(v: Any) -> float:
         return 0.0
 
 
+def _date10(v: Any) -> str:
+    s = str(v or "").strip()
+    return s[:10] if s else ""
+
+
 def generate_executive_summary(
     question: str,
     intent: Dict[str, Any],
@@ -38,7 +46,7 @@ def generate_executive_summary(
     executive_context: Dict[str, Any],
 ) -> Optional[str]:
     """
-    Genera resumen_ejecutivo DESPUÉS de enriquecer executive_context (CXC-06/CXC-03/CXC-04/CXC-07),
+    Genera resumen_ejecutivo DESPUÉS de enriquecer executive_context (CXC-06/CXC-03/CXC-04/CXC-07/CXC-08),
     para que NO contradiga la respuesta operativa.
 
     Retorna string o None.
@@ -48,70 +56,66 @@ def generate_executive_summary(
 
     # Señales operativas clave (solo lo que importa para no contradecir)
     due_on = (
-        executive_context.get("cxc_due_on")
-        or executive_context.get("cxc_invoices_due_on")
+        (executive_context or {}).get("cxc_due_on")
+        or (executive_context or {}).get("cxc_invoices_due_on")
         or {}
     )
-    due_range = executive_context.get("due_range_summary") or {}
-    top_clients = executive_context.get("top_clientes_cxc") or {}
-    aging = executive_context.get("aging_summary") or {}
+    due_range = (executive_context or {}).get("due_range_summary") or {}
+    top_clients = (executive_context or {}).get("top_clientes_cxc") or {}
+    aging = (executive_context or {}).get("aging_summary") or {}
 
     # ✅ CXC-07: pagos parciales
     partial = (
-        executive_context.get("cxc_pago_parcial")
-        or executive_context.get("cxc_partial_payments")
+        (executive_context or {}).get("cxc_pago_parcial")
+        or (executive_context or {}).get("cxc_partial_payments")
+        or {}
+    )
+
+    # ✅ CXC-08: saldo cliente al corte
+    saldo_cliente = (
+        (executive_context or {}).get("cxc_saldo_cliente")
+        or (executive_context or {}).get("cxc_customer_open_balance_on")
         or {}
     )
 
     # intent flags
-    vencen_hoy_cxc = _coerce_bool(intent.get("vencen_hoy_cxc"))
-    vencimientos_rango = _coerce_bool(intent.get("vencimientos_rango"))
-    top_clientes_cxc = _coerce_bool(intent.get("top_clientes_cxc"))
-    aging_flag = _coerce_bool(intent.get("aging"))
+    vencen_hoy_cxc = _coerce_bool((intent or {}).get("vencen_hoy_cxc"))
+    vencimientos_rango = _coerce_bool((intent or {}).get("vencimientos_rango"))
+    top_clientes_cxc = _coerce_bool((intent or {}).get("top_clientes_cxc"))
+    aging_flag = _coerce_bool((intent or {}).get("aging"))
 
     # ✅ CXC-07
-    cxc_pago_parcial = _coerce_bool(intent.get("cxc_pago_parcial"))
+    cxc_pago_parcial = _coerce_bool((intent or {}).get("cxc_pago_parcial"))
+
+    # ✅ CXC-08
+    saldo_cliente_cxc = _coerce_bool((intent or {}).get("saldo_cliente_cxc"))
 
     # ------------------------------------------------------------------
-    # ✅ (Opcional recomendado) Resumen determinístico para evitar cualquier
-    # contradicción por LLM en casos operativos.
-    #
-    # Si querés activarlo, descomentá este bloque.
+    # ✅ Resumen determinístico para CXC-08 (evita que el LLM “se vaya” al aging global).
     # ------------------------------------------------------------------
-    # try:
-    #     if cxc_pago_parcial:
-    #         cnt = int((partial or {}).get("count") or 0)
-    #         total = _money((partial or {}).get("total_saldo_pendiente"))
-    #         return (
-    #             f"En el rango consultado, hay {cnt} facturas CxC con pago parcial "
-    #             f"y un saldo pendiente total de ₡{total:,.2f}."
-    #             if cnt > 0
-    #             else "No se encontraron facturas CxC con pago parcial en el rango consultado."
-    #         )
-    #     if vencen_hoy_cxc:
-    #         cnt = int((due_on or {}).get("count") or 0)
-    #         total = _money((due_on or {}).get("total") or (due_on or {}).get("saldo_total"))
-    #         date = (due_on or {}).get("date") or (due_on or {}).get("as_of") or ""
-    #         date = str(date)[:10] if date else ""
-    #         if cnt > 0:
-    #             return f"Hay {cnt} facturas CxC que vencen en {date}, con un total de ₡{total:,.2f}."
-    #         return f"No hay facturas CxC que venzan en {date or 'esa fecha'}."
-    #     if vencimientos_rango:
-    #         cnt = int((due_range or {}).get("count") or 0)
-    #         total = _money((due_range or {}).get("total") or (due_range or {}).get("saldo_total"))
-    #         start = str((due_range or {}).get("start") or "")[:10]
-    #         end = str((due_range or {}).get("end") or "")[:10]
-    #         return f"Entre {start} y {end} vencen {cnt} facturas CxC por un total de ₡{total:,.2f}."
-    #     if top_clientes_cxc:
-    #         rows = (top_clients or {}).get("rows") or []
-    #         if isinstance(rows, list) and rows:
-    #             top1 = rows[0]
-    #             name = top1.get("cliente_nombre") or f"Cliente #{top1.get('id_entidad_cliente')}"
-    #             saldo = _money(top1.get("saldo_total"))
-    #             return f"El mayor saldo CxC abierto es de {name}: ₡{saldo:,.2f}."
-    # except Exception:
-    #     pass
+    try:
+        if saldo_cliente_cxc:
+            c = saldo_cliente or {}
+            # si por alguna razón no viene saldo_cliente, no devolvemos y dejamos que LLM intente
+            if isinstance(c, dict) and ("saldo" in c or "count_facturas" in c):
+                as_of = _date10(c.get("as_of") or (period_resolved or {}).get("text") or "")
+                customer = str(c.get("customer") or "").strip() or "el cliente consultado"
+                saldo = _money(c.get("saldo"))
+                cnt = int(c.get("count_facturas") or 0)
 
+                # Nota: el símbolo ₡ lo podés ajustar si tu sistema es multi-moneda.
+                return (
+                    f"Al {as_of or 'corte consultado'}, {customer} tiene un saldo abierto por cobrar de ₡{saldo:,.2f}, "
+                    f"distribuido en {cnt} factura(s) pendiente(s)."
+                    if cnt > 0
+                    else f"Al {as_of or 'corte consultado'}, {customer} no presenta saldo abierto por cobrar."
+                )
+    except Exception:
+        pass
+
+    # ------------------------------------------------------------------
+    # Prompt LLM (para el resto de casos)
+    # ------------------------------------------------------------------
     system = (
         "Eres un analista ejecutivo financiero.\n"
         "Tu tarea: redactar un resumen_ejecutivo corto y CLARO (1-3 oraciones).\n"
@@ -133,6 +137,8 @@ def generate_executive_summary(
             "aging": aging_flag,
             # ✅ CXC-07
             "cxc_pago_parcial": cxc_pago_parcial,
+            # ✅ CXC-08
+            "saldo_cliente_cxc": saldo_cliente_cxc,
         },
         "kpis": kpis,
         "operational_context": {
@@ -140,16 +146,23 @@ def generate_executive_summary(
             "due_range_summary": due_range,    # CXC-03
             "top_clientes_cxc": top_clients,   # CXC-04
             "aging_summary": aging,            # aging general
-            # ✅ CXC-07
-            "cxc_pago_parcial": partial,
+            "cxc_pago_parcial": partial,       # CXC-07
+            "cxc_saldo_cliente": saldo_cliente # ✅ CXC-08
         },
     }
 
     # Instrucción específica según intent (para que sea ultra consistente)
     focus = "General."
 
+    # ✅ PRIORIDAD: CXC-08 por encima de todo lo demás
+    if saldo_cliente_cxc:
+        focus = (
+            "Enfócate EXCLUSIVAMENTE en el saldo abierto del cliente al corte (CXC-08). "
+            "Usa operational_context.cxc_saldo_cliente.customer, saldo y count_facturas. "
+            "NO uses aging_summary.total_por_cobrar porque es global y puede contradecir."
+        )
     # ✅ PRIORIDAD: CXC-07 antes que aging / vencidas
-    if cxc_pago_parcial:
+    elif cxc_pago_parcial:
         focus = (
             "Enfócate EXCLUSIVAMENTE en facturas CxC con pago parcial. "
             "Usa operational_context.cxc_pago_parcial.count y total_saldo_pendiente. "
@@ -178,7 +191,7 @@ def generate_executive_summary(
     human = (
         f"{focus}\n\n"
         "Contexto (JSON):\n"
-        f"{_safe_json(payload)}\n\n"
+        f"{_safe_json_or_str(payload)}\n\n"
         "Redacta el resumen ejecutivo ahora:"
     )
 
