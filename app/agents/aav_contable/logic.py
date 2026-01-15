@@ -132,7 +132,8 @@ class Agent(BaseAgent):
                 break
 
         # Vencido = suma buckets de aging (si existen)
-        aging = data.get("aging") or {}
+        aging = data.get("aging") or data.get("aging_overdue") or {}
+
         if isinstance(aging, dict) and aging:
             try:
                 vencido = sum(float(aging.get(k) or 0.0) for k in ("0_30", "31_60", "61_90", "90_plus"))

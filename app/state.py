@@ -52,10 +52,10 @@ class GlobalState:
     period_raw: Optional[str] = None
     context: Dict[str, Any] = field(default_factory=dict)
 
-    # 🔥 NUEVO: contexto que viene desde el frontend
+
     company_context: Dict[str, Any] = field(default_factory=dict)
 
-    # 🔥 NUEVO: reglas activadas de la base de conocimiento
+   
     kb_rules: Dict[str, Any] = field(default_factory=dict)
 
     trace: List[Dict[str, Any]] = field(default_factory=list)

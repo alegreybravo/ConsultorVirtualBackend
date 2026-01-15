@@ -69,6 +69,20 @@ def resolve_period(nl: str | None, override: dict | None = None) -> dict:
             "source": "nlp",
             "tz": str(TZ)
         }
+        # 1.c) Year-Month: 2025-10  -> ventana mensual
+    m = re.search(r"\b(\d{4})-(\d{2})\b", text)
+    if m:
+        y, mo = int(m.group(1)), int(m.group(2))
+        if 1 <= mo <= 12:
+            return {
+                "text": f"{y:04d}-{mo:02d}",
+                "start": _start_of_month(y, mo),
+                "end": _end_of_month(y, mo),
+                "granularity": "month",
+                "source": "nlp",
+                "tz": str(TZ)
+            }
+
 
     # LatAm: 29/10/2025 o 29/10/25
     m = re.search(r"\b(\d{1,2})/(\d{1,2})/(\d{2,4})\b", text)
