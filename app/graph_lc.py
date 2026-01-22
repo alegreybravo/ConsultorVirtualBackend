@@ -208,9 +208,22 @@ def run_query(
                     "tz": str(TZ),
                 }
 
-        # ✅ fecha única para CXC-04 (top clientes) y CXC-08 (saldo cliente al corte)
-        if getattr(intent, "top_clientes_cxc", False) or getattr(intent, "saldo_cliente_cxc", False):
+        # ✅ fecha única para cortes "as_of"
+        # CXC: CXC-04 (top clientes) / CXC-08 (saldo cliente)
+        # CXP: CXP-01 (abiertas resumen) / CXP-02 (aging) / CXP-03 (top proveedores) / CXP-05 (saldo proveedor)
+        needs_as_of = (
+            getattr(intent, "top_clientes_cxc", False)
+            or getattr(intent, "saldo_cliente_cxc", False)
+            or getattr(intent, "cxp_abiertas_resumen", False)   # ✅ CXP-01
+            or getattr(intent, "aging_cxp", False)
+            or getattr(intent, "top_proveedores_cxp", False)
+            or getattr(intent, "saldo_proveedor_cxp", False)
+        )
+
+        # No pise as_of_meta si ya lo seteó algún flag previo
+        if needs_as_of and not as_of_meta:
             one = _extract_one_date(question)
+
             if one is None and re.search(r"\b(hoy|para hoy|del día)\b", (question or "").lower()):
                 now = datetime.now(TZ)
                 one = datetime(now.year, now.month, now.day, 23, 59, 59, tzinfo=TZ)

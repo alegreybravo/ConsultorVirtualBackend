@@ -80,6 +80,90 @@ def _derive_metrics_from_trace(trace: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {"dso": dso, "dpo": dpo, "ccc": ccc, "cash": cash}
 
 
+def _truthy(x: Any) -> bool:
+    return bool(x is True)
+
+
+def _select_agents_with_meta(question: str, meta_in: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    1) Decide con decide_agents(question)
+    2) Si el graph ya determinó intent (cxc/cxp), NO lo sobreescribimos:
+       - cxp=true y cxc=false  => prohibe aaav_cxc
+       - cxc=true y cxp=false  => prohibe aaav_cxp
+    3) Además, si hay señales fuertes específicas (flags), forzamos el agente correspondiente.
+    """
+    intent_pack = decide_agents(question) or {"selected": [], "reasons": {}}
+    selected: List[str] = list(intent_pack.get("selected") or [])
+    reasons: Dict[str, Any] = dict(intent_pack.get("reasons") or {})
+
+    intent = (meta_in.get("intent") or {}) if isinstance(meta_in, dict) else {}
+    if not isinstance(intent, dict):
+        intent = {}
+
+    # -------------------------
+    # 2) Respeto estricto a cxc/cxp del graph (evita "mezclar" módulos)
+    # -------------------------
+    graph_cxc = _truthy(intent.get("cxc"))
+    graph_cxp = _truthy(intent.get("cxp"))
+
+    # Si el graph fue explícito SOLO CxP -> eliminamos aaav_cxc si venía por keywords/LLM
+    if graph_cxp and not graph_cxc:
+        selected = [a for a in selected if a != "aaav_cxc"]
+        reasons["router_guard"] = (reasons.get("router_guard") or []) + ["graph_says_only_cxp_drop_cxc"]
+
+    # Si el graph fue explícito SOLO CxC -> eliminamos aaav_cxp si venía por keywords/LLM
+    if graph_cxc and not graph_cxp:
+        selected = [a for a in selected if a != "aaav_cxp"]
+        reasons["router_guard"] = (reasons.get("router_guard") or []) + ["graph_says_only_cxc_drop_cxp"]
+
+    # -------------------------
+    # 3) Señales fuertes por flags (forzar agente correcto)
+    # -------------------------
+    cxc_strong = any(
+        _truthy(intent.get(k))
+        for k in (
+            "vencimientos_rango",
+            "top_clientes_cxc",
+            "vencen_hoy_cxc",
+            "cxc_pago_parcial",
+            "saldo_cliente_cxc",
+        )
+    )
+
+    # ✅ FIX: incluir CXP-01 (cxp_abiertas_resumen) como señal fuerte
+    cxp_strong = any(
+        _truthy(intent.get(k))
+        for k in (
+            "cxp_abiertas_resumen",   # ✅ CXP-01
+            "aging_cxp",              # CXP-02
+            "top_proveedores_cxp",    # CXP-03
+            "saldo_proveedor_cxp",    # CXP-05
+        )
+    )
+
+    # También si el intent general dice cxc/cxp, eso cuenta como fuerte
+    if graph_cxc:
+        cxc_strong = True
+    if graph_cxp:
+        cxp_strong = True
+
+    # Forzar agentes si corresponde, pero respetando el guard:
+    # - si graph dice SOLO CxP, no insertes aaav_cxc aunque haya flags raros
+    if cxc_strong and not (graph_cxp and not graph_cxc) and "aaav_cxc" not in selected:
+        selected.insert(0, "aaav_cxc")
+        reasons["aaav_cxc"] = (reasons.get("aaav_cxc") or []) + ["forced_by_graph_intent"]
+
+    # - si graph dice SOLO CxC, no insertes aaav_cxp
+    if cxp_strong and not (graph_cxc and not graph_cxp) and "aaav_cxp" not in selected:
+        idx = 1 if (selected and selected[0] == "aaav_cxc") else 0
+        selected.insert(idx, "aaav_cxp")
+        reasons["aaav_cxp"] = (reasons.get("aaav_cxp") or []) + ["forced_by_graph_intent"]
+
+    intent_pack["selected"] = _dedup_preserving_order(selected)
+    intent_pack["reasons"] = reasons
+    return intent_pack
+
+
 # -----------------------------
 # Router principal (único orquestador)
 # -----------------------------
@@ -91,7 +175,7 @@ class Router:
         payload = task.get("payload", {}) or {}
         question = payload.get("question", "") or ""
 
-        # ✅ 0) Traer meta desde graph (CRÍTICO para aaav_cxc)
+        # ✅ 0) Traer meta desde graph (CRÍTICO para aaav_cxc / aaav_cxp)
         meta_in: Dict[str, Any] = payload.get("_meta") or {}
 
         # ✅ 1) Resolver período híbrido:
@@ -119,8 +203,8 @@ class Router:
         }
         state.period = period  # queda disponible para todos los agentes
 
-        # 2) Decisión exhaustiva de agentes (keywords + LLM, SIN defaults)
-        intent_pack = decide_agents(question)  # {selected: [...], reasons: {...}}
+        # ✅ 2) Decisión de agentes (keywords + LLM) + guard por meta intent del graph
+        intent_pack = _select_agents_with_meta(question, meta_in)
         agent_sequence: List[str] = _dedup_preserving_order(intent_pack.get("selected", []))
 
         # 🔗 Regla: si hay CxC o CxP, forzar Contable para consolidar KPIs
@@ -135,7 +219,6 @@ class Router:
                 "intent_decision": intent_pack,
                 "question": question,
                 "period": period,
-                # ✅ para depurar: confirmar que meta viajó hasta aquí
                 "_meta_in": meta_in,
             }
         )
@@ -169,7 +252,6 @@ class Router:
             }
 
         # ✅ payload base para agentes: aquí viaja _meta, action, params
-        # (aaav_cxc lo necesita para auto-params start/end por date_range)
         base_agent_payload = {
             "question": question,
             "period_range": period,
@@ -203,7 +285,7 @@ class Router:
             if agent_name == "aaav_cxp" and not result.get("error"):
                 cxp_blob = result
 
-        # 6) Ejecutar Contable si corresponde (estaba en la secuencia o hay al menos un blob)
+        # 6) Ejecutar Contable si corresponde
         run_contable = ("aav_contable" in agent_sequence) or (cxc_blob is not None or cxp_blob is not None)
         if run_contable:
             contable = get_agent("aav_contable")

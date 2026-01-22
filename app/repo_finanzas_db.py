@@ -1,11 +1,28 @@
 # app/repo_finanzas_db.py
-from datetime import datetime, timedelta
-from decimal import Decimal
+from __future__ import annotations
 
-from sqlalchemy import func, or_
+from datetime import date, datetime, timedelta
+from decimal import Decimal
+from typing import Any, Dict, List
+
+from sqlalchemy import func, cast, literal, or_, text
+from sqlalchemy.sql import case as sql_case
+from sqlalchemy.types import String
 
 from .database import SessionLocal
 from app.models import FacturaCXC, FacturaCXP, Entidad
+
+
+def _to_date(v: Any) -> date:
+    if isinstance(v, date) and not isinstance(v, datetime):
+        return v
+    if isinstance(v, datetime):
+        return v.date()
+    # strings ISO: "2025-10-29" o "2025-10-29T23:59:59..."
+    s = str(v or "").strip()
+    if not s:
+        raise ValueError("as_of vacío")
+    return datetime.fromisoformat(s[:19]).date() if "T" in s else date.fromisoformat(s[:10])
 
 
 def _month_bounds(year: int, month: int):
@@ -283,12 +300,6 @@ class FinanzasRepoDB:
     def cxc_top_clients_open(self, as_of: datetime, limit: int = 5) -> dict:
         """
         Top N clientes por saldo abierto CxC (saldo pendiente > 0) al 'as_of'.
-
-        Nota: como la BD no tiene historial de pagos por fecha, esto usa:
-          - facturas emitidas <= as_of
-          - pagada = false
-          - saldo actual (monto - coalesce(monto_pagado,0))
-        Agrupa por id_entidad_cliente y devuelve nombre desde tabla entidad.
         """
         if as_of and as_of.tzinfo:
             as_of = as_of.replace(tzinfo=None)
@@ -300,8 +311,6 @@ class FinanzasRepoDB:
         db = SessionLocal()
         try:
             saldo_expr = func.greatest(FacturaCXC.monto - func.coalesce(FacturaCXC.monto_pagado, 0), 0)
-
-            # nombre: preferí nombre_comercial, si no nombre_legal
             nombre_expr = func.coalesce(Entidad.nombre_comercial, Entidad.nombre_legal).label("cliente_nombre")
 
             q = (
@@ -340,11 +349,10 @@ class FinanzasRepoDB:
         finally:
             db.close()
 
-    # ---------- CXC-06: Facturas CxC que vencen en una fecha (lista + saldos) ----------
+    # ---------- CXC-06: Facturas CxC que vencen en una fecha ----------
     def cxc_invoices_due_on(self, day: datetime) -> dict:
         """
-        Lista facturas CxC cuyo vencimiento (fecha_limite) cae en el día indicado (00:00:00 - 23:59:59),
-        con su saldo pendiente y el nombre del cliente (Entidad).
+        Lista facturas CxC cuyo vencimiento (fecha_limite) cae en el día indicado.
         """
         if day and day.tzinfo:
             day = day.replace(tzinfo=None)
@@ -473,9 +481,6 @@ class FinanzasRepoDB:
     def cxc_customer_open_balance_on(self, customer_name: str, as_of: datetime) -> dict:
         """
         CXC-08: Saldo abierto CxC de un cliente al corte (as_of).
-        - Usa facturas emitidas <= as_of (corte) y pagada = False
-        - saldo = greatest(monto - coalesce(monto_pagado, 0), 0)
-        - match robusto por Entidad.nombre_legal / nombre_comercial (case-insensitive + sin tildes)
         """
         if not customer_name:
             return {"error": "customer_name requerido", "source": "db"}
@@ -494,18 +499,15 @@ class FinanzasRepoDB:
                 0
             )
 
-            # ---- Resolver Entidad (robusto) ----
             cust_id = None
             cust = None
 
-            # Si viene un id numérico, usarlo directo
             try:
                 cust_id = int(name_raw)
             except Exception:
                 cust_id = None
 
             if cust_id is None:
-                # Match sin tildes: unaccent(lower(campo)) LIKE %unaccent(lower(input))%
                 needle = func.unaccent(func.lower(name_raw))
                 legal = func.unaccent(func.lower(Entidad.nombre_legal))
                 comercial = func.unaccent(func.lower(Entidad.nombre_comercial))
@@ -538,7 +540,6 @@ class FinanzasRepoDB:
 
             customer_display = (cust.nombre_legal or cust.nombre_comercial or name_raw) if cust else name_raw
 
-            # ---- Query saldo por id_entidad_cliente ----
             row = (
                 db.query(
                     func.sum(saldo_expr).label("saldo"),
@@ -566,4 +567,195 @@ class FinanzasRepoDB:
             }
         finally:
             db.close()
-    
+
+    # ---------- CXP-02: Aging CxP al corte ----------
+    def cxp_aging_as_of(self, as_of: Any) -> Dict[str, Any]:
+        """
+        Aging CxP al corte (as_of) con buckets:
+        No vencido, 1-30, 31-60, 61-90, 90+
+        """
+        as_of_date = _to_date(as_of)
+
+        db = SessionLocal()
+        try:
+            saldo_expr = func.greatest(
+                (FacturaCXP.monto - func.coalesce(FacturaCXP.monto_pagado, 0)),
+                0
+            )
+
+            days_over_expr = (literal(as_of_date) - func.date(FacturaCXP.fecha_limite))
+
+            bucket_expr = sql_case(
+                (days_over_expr <= 0, "No vencido"),
+                (days_over_expr <= 30, "1-30"),
+                (days_over_expr <= 60, "31-60"),
+                (days_over_expr <= 90, "61-90"),
+                else_="90+",
+            ).label("bucket")
+
+            q = (
+                db.query(
+                    bucket_expr,
+                    func.sum(saldo_expr).label("total")
+                )
+                .filter(FacturaCXP.pagada.is_(False))
+                .filter(saldo_expr > 0)
+                .group_by(bucket_expr)
+            )
+
+            rows = [{"bucket": b, "total": float(t or 0)} for (b, t) in q.all()]
+
+            buckets = {"No vencido": 0.0, "1-30": 0.0, "31-60": 0.0, "61-90": 0.0, "90+": 0.0}
+            for r in rows:
+                b = r.get("bucket")
+                if b in buckets:
+                    buckets[b] = float(r.get("total") or 0.0)
+
+            total = sum(buckets.values())
+            overdue = buckets["1-30"] + buckets["31-60"] + buckets["61-90"] + buckets["90+"]
+
+            return {
+                "as_of": as_of_date.isoformat(),
+                "buckets": buckets,
+                "total_open": float(total),
+                "total_overdue": float(overdue),
+                "rows": rows,
+                "source": "db",
+            }
+        finally:
+            db.close()
+
+    # ---------- CXP-03: Top proveedores por saldo abierto ----------
+    def cxp_top_suppliers_open(self, as_of: datetime, limit: int = 5) -> dict:
+        """
+        CXP-03: Top N proveedores por saldo CxP abierto.
+        """
+        if as_of.tzinfo:
+            as_of = as_of.replace(tzinfo=None)
+
+        limit = int(limit or 5)
+        if limit <= 0:
+            limit = 5
+
+        db = SessionLocal()
+        try:
+            saldo_expr = func.greatest(
+                FacturaCXP.monto - func.coalesce(FacturaCXP.monto_pagado, 0),
+                0
+            )
+
+            nombre_legal_expr = Entidad.nombre_legal.label("nombre_legal")
+
+            q = (
+                db.query(
+                    nombre_legal_expr,
+                    func.sum(saldo_expr).label("saldo"),
+                )
+                .join(
+                    Entidad,
+                    cast(Entidad.id_entidad, String) == cast(FacturaCXP.id_entidad_proveedor, String)
+                )
+                .filter(
+                    FacturaCXP.pagada == False,
+                    saldo_expr > 0,
+                )
+                .group_by(nombre_legal_expr)
+                .order_by(func.sum(saldo_expr).desc())
+                .limit(limit)
+            )
+
+            rows = [{"proveedor": n, "saldo": float(s or 0)} for (n, s) in q.all()]
+
+            return {
+                "as_of": as_of.isoformat(),
+                "limit": limit,
+                "rows": rows,
+                "source": "db",
+            }
+        finally:
+            db.close()
+
+    # ---------- CXP-05: saldo abierto de proveedor al corte ----------
+    def cxp_supplier_open_balance_on(self, supplier_name: str, as_of: datetime) -> dict:
+        """
+        CXP-05: saldo abierto con proveedor X al corte.
+        """
+        if not supplier_name:
+            return {"error": "supplier_name requerido", "source": "db"}
+
+        if as_of.tzinfo:
+            as_of = as_of.replace(tzinfo=None)
+
+        name = str(supplier_name).strip()
+
+        db = SessionLocal()
+        try:
+            saldo_expr = func.greatest(
+                FacturaCXP.monto - func.coalesce(FacturaCXP.monto_pagado, 0),
+                0
+            )
+
+            q = (
+                db.query(func.sum(saldo_expr).label("saldo"))
+                .join(
+                    Entidad,
+                    cast(Entidad.id_entidad, String) == cast(FacturaCXP.id_entidad_proveedor, String)
+                )
+                .filter(
+                    FacturaCXP.pagada == False,
+                    Entidad.nombre_legal == name,
+                    saldo_expr > 0,
+                )
+            )
+
+            row = q.first()
+            saldo = float((row.saldo if row else 0) or 0)
+
+            return {
+                "as_of": as_of.date().isoformat(),
+                "supplier": name,
+                "saldo": saldo,
+                "source": "db",
+            }
+        finally:
+            db.close()
+
+    # ---------- SQL helper ----------
+    def _fetchone(self, sql: str, params: dict | None = None) -> dict | None:
+        """
+        Ejecuta SQL y retorna 1 fila como dict (mappings) o None.
+        """
+        db = SessionLocal()
+        try:
+            res = db.execute(text(sql), params or {})
+            row = res.mappings().first()
+            return dict(row) if row else None
+        finally:
+            db.close()
+
+    # ---------- ✅ CXP-01: resumen de abiertas + saldo al corte ----------
+    def cxp_open_summary_as_of(self, as_of: Any) -> dict:
+        """
+        CXP-01: ¿Cuántas facturas CxP están abiertas al corte y el saldo total?
+        Nota: como no hay historial de pagos por fecha, se usa saldo actual.
+        """
+        as_of_date = _to_date(as_of)
+        as_of_10 = as_of_date.isoformat()
+
+        sql = """
+        SELECT
+            COUNT(*) AS abiertas,
+            COALESCE(SUM(monto - monto_pagado), 0) AS saldo
+        FROM agente_virtual.factura_cxp
+        WHERE pagada = FALSE
+          AND fecha_emision::date <= :as_of;
+        """
+
+        row = self._fetchone(sql, {"as_of": as_of_10}) or {"abiertas": 0, "saldo": 0}
+
+        return {
+            "as_of": as_of_10,
+            "abiertas": int(row.get("abiertas") or 0),
+            "saldo": float(row.get("saldo") or 0.0),
+            "source": "db",
+        }
