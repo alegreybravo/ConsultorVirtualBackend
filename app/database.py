@@ -17,6 +17,7 @@ DATABASE_URL = (
     f"@{DB_HOST}:{DB_PORT}/{DB_NAME}?sslmode={DB_SSLMODE}"
 )
 
+
 engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True,
