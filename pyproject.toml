@@ -8,26 +8,42 @@ requires-python = ">=3.10"
 authors = [
   { name = "Joxan Portilla Hernandez", email = "joxanportilla@gmail.com" }
 ]
+
 dependencies = [
+  # Core
+  "requests>=2.32.0",
+  "python-dotenv>=1.0.0",
+  "python-dateutil>=2.9.0",
+  "pyyaml>=6.0.0",
+  "jsonschema>=4.23.0",
+  "python-multipart>=0.0.9",
+
+  # Data
   "pandas>=2.2.2",
   "openpyxl>=3.1.5",
-  "jsonschema>=4.23.0",
-  "python-dateutil>=2.9.0",
-  "pyyaml>=6.0.2",
+
+  # API
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.30.0",
+
+  # Validation / settings
   "pydantic>=2.9.0",
-  "requests>=2.31.0",
+  "pydantic-settings>=2.0.0",
+
+  # DB (según tu pip list actual)
+  "psycopg[binary]>=3.2.0",
+  "sqlalchemy>=2.0.0",
+
+  # Firebase (si lo usás ya)
+  "firebase-admin>=7.0.0",
+
+  # LLM stack
+  "openai>=1.0.0",
   "langchain>=0.2.6",
   "langchain-community>=0.2.6",
   "langgraph>=0.2.2",
-  "fastapi>=0.115.0",
-  "uvicorn[standard]>=0.30.0",
-  "python-dotenv>=1.0.0",
-  "pydantic-settings>=2.0.0",
-  "python-multipart>=0.0.9"
-  "langchain-openai>=0.1.0"
-
+  "langchain-openai>=0.1.0",
 ]
-
 
 [build-system]
 requires = ["setuptools>=69", "wheel"]
