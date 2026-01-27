@@ -166,11 +166,11 @@ def _merge_executive_context_patches(result: Dict[str, Any]) -> None:
 def run_query(
     question: str,
     period: Optional[str] = None,
-    company_context: Optional[Dict[str, Any]] = None,
+    meta: Optional[Dict[str, Any]] = None,  # ✅ ahora recibe meta (auth, tenant, etc.)
 ) -> Dict[str, Any]:
     state = GlobalState()
     state.period_raw = period
-    state.company_context = company_context or {}
+    state.company_context = meta or {}  # ✅ guardamos meta por request (opcional)
 
     intent = None
     date_range_meta = None
@@ -209,8 +209,6 @@ def run_query(
                 }
 
         # ✅ fecha única para cortes "as_of"
-        # CXC: CXC-04 (top clientes) / CXC-08 (saldo cliente)
-        # CXP: CXP-01 (abiertas resumen) / CXP-02 (aging) / CXP-03 (top proveedores) / CXP-05 (saldo proveedor)
         needs_as_of = (
             getattr(intent, "top_clientes_cxc", False)
             or getattr(intent, "saldo_cliente_cxc", False)
@@ -220,7 +218,6 @@ def run_query(
             or getattr(intent, "saldo_proveedor_cxp", False)
         )
 
-        # No pise as_of_meta si ya lo seteó algún flag previo
         if needs_as_of and not as_of_meta:
             one = _extract_one_date(question)
 
@@ -245,8 +242,11 @@ def run_query(
     # -------------------------
     # ✅ payload con _meta ANTES del dispatch
     # -------------------------
+    incoming_meta = meta or {}  # ✅ aquí llega auth desde el API
+
     payload: Dict[str, Any] = {"question": question, "period": period}
     payload["_meta"] = {
+        **incoming_meta,  # ✅ conserva auth/tenant/otros
         "intent": intent.model_dump() if intent is not None else {},
         "date_range": date_range_meta,
         "due_on": due_on_meta,
@@ -265,16 +265,21 @@ def run_query(
     # -------------------------
     # _meta final en result
     # -------------------------
-    meta = result.get("_meta") or {}
+    out_meta = result.get("_meta") or {}
     if intent is not None:
-        meta["intent"] = intent.model_dump()
+        out_meta["intent"] = intent.model_dump()
         if date_range_meta:
-            meta["date_range"] = date_range_meta
+            out_meta["date_range"] = date_range_meta
         if due_on_meta:
-            meta["due_on"] = due_on_meta
+            out_meta["due_on"] = due_on_meta
         if as_of_meta:
-            meta["as_of"] = as_of_meta
-    result["_meta"] = meta
+            out_meta["as_of"] = as_of_meta
+
+    # ✅ preservar meta entrante (auth/tenant) en la salida también
+    for k, v in (incoming_meta or {}).items():
+        out_meta.setdefault(k, v)
+
+    result["_meta"] = out_meta
 
     metrics_global = _build_metrics_global(result)
     metrics_cxc = _build_metrics_cxc(result)
@@ -295,9 +300,9 @@ def run_query(
     }
 
     result["kb_rules"] = kb_rules
-    meta = result.get("_meta") or {}
-    meta["data_mode"] = data_mode
-    result["_meta"] = meta
+    out_meta = result.get("_meta") or {}
+    out_meta["data_mode"] = data_mode
+    result["_meta"] = out_meta
 
     # -------------------------
     # ✅ merge genérico de patches

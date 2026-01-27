@@ -2,12 +2,19 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from typing import Any, Dict
 
 from app.graph_lc import run_query
 from app.api_models import ChatRequest, ChatResponse
 from app.api_adapter import build_frontend_payload
+
+# ✅ Firebase init + auth dependency
+from app.auth.firebase_admin import init_firebase
+from app.auth.dependencies import get_current_user, CurrentUser
+
+# ✅ NUEVO: incluir router de auth (/auth/register)
+from app.auth.router import router as auth_router
 
 
 app = FastAPI(
@@ -16,6 +23,14 @@ app = FastAPI(
     version="0.1.0",
 )
 
+# ✅ registrar endpoints de auth
+app.include_router(auth_router)
+
+
+@app.on_event("startup")
+def _startup():
+    init_firebase()
+
 
 @app.get("/health")
 async def health():
@@ -23,18 +38,21 @@ async def health():
 
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat(body: ChatRequest, debug: bool = False):
-    """
-    Endpoint principal para el frontend (Flutter, web, etc.).
-    - question: pregunta en lenguaje natural
-    - period: opcional; si viene vacío, el backend hace NLP/auto
-    - debug: si true, incluye el 'raw' completo en la respuesta
-    """
+async def chat(
+    body: ChatRequest,
+    debug: bool = False,
+    user: CurrentUser = Depends(get_current_user),
+):
     question = body.question.strip()
-    period_str = (body.period or "").strip() or None  # None = que el grafo resuelva
+    period_str = (body.period or "").strip() or None
 
-    # 👇 Aquí se arma todo el informe (intents, CxC, CxP, etc.)
-    result: Dict[str, Any] = run_query(question, period_str)
+    meta = {
+        "auth": {
+            "uid": user.uid,
+            "email": user.email,
+            "claims": user.claims,
+        }
+    }
 
-    # 👇 Aquí se lo "resumimos" para el frontend
+    result: Dict[str, Any] = run_query(question, period_str, meta=meta)
     return build_frontend_payload(result, include_raw=debug)
