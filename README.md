@@ -1,7 +1,7 @@
 # Asistente Virtual
 
-**Versión:** 0.1.0  
-**Autor:** Joxan Portilla Hernández  y Paula Morales Soto
+**Versión:** 0.2  
+**Autor:** Joxan Portilla Hernández 
 
 DESARROLLO PARA ALEGRE Y BRAVO 
 
@@ -11,7 +11,7 @@ DESARROLLO PARA ALEGRE Y BRAVO
 
 ## Descripción
 
-El Asistente Virtual es un proyecto desarrollado en Python que integra agentes de inteligencia artificial para la gestión y análisis de información empresarial.  
+El Consultor Virtual es un proyecto desarrollado en Python que integra agentes de inteligencia artificial para la gestión y análisis de información empresarial.  
 Está diseñado con un enfoque modular y escalable, permitiendo la conexión con fuentes de datos (bases de datos, hojas de cálculo, APIs) y la orquestación de agentes inteligentes usando LangChain y LangGraph.
 
 Su objetivo es asistir en tareas analíticas como:
